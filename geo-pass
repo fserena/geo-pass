@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 """
 #-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=#
   Ontology Engineering Group
@@ -19,29 +20,16 @@
 #-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=#
 """
 
-import json
-
-from setuptools import setup, find_packages
+import os
 
 __author__ = 'Fernando Serena'
 
-with open("geo_pass/metadata.json", 'r') as stream:
-    metadata = json.load(stream)
 
-setup(
-    name="geo-pass",
-    version=metadata['version'],
-    author=metadata['author'],
-    author_email=metadata['email'],
-    description=metadata['description'],
-    license="Apache 2",
-    keywords=["overpass", "osm"],
-    url=metadata['github'],
-    download_url="https://github.com/fserena/geo-pass/tarball/{}".format(metadata['version']),
-    packages=find_packages(exclude=['ez_setup', 'examples', 'tests']),
-    install_requires=['overpy', 'flask', 'Flask-Cache', 'LatLon', 'gevent'],
-    classifiers=[],
-    package_dir={'geo_pass': 'geo_pass'},
-    package_data={'geo_pass': ['metadata.json']},
-    scripts=['geo-pass']
-)
+port = int(os.environ.get('API_PORT', 5006))
+
+if __name__ == '__main__':
+    from geo_pass.api import app
+    from gevent.wsgi import WSGIServer
+
+    http_server = WSGIServer(('', port), app)
+    http_server.serve_forever()
