@@ -27,7 +27,7 @@ from LatLon import LatLon
 from flask import Flask, request, jsonify
 from overpy.exception import DataIncomplete
 from flask_cache import Cache
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Point, Polygon, LineString
 from shapely.wkt import dumps
 
 __author__ = 'Fernando Serena'
@@ -322,10 +322,11 @@ def get_way_geom(id):
     geom = g_way_geom(id)
     points = map(lambda n: (float(n.lon), float(n.lat)), geom)
 
-    polygon = Polygon(points)
-    # polygon = Polygon(polygon.exterior.coords)
-    # polygon = orient(polygon)
-    response = jsonify({'wkt': dumps(polygon)})
+    try:
+        shape = Polygon(points)
+    except ValueError:
+        shape = LineString(points)
+    response = jsonify({'wkt': dumps(shape)})
     response.headers['Cache-Control'] = 'max-age=3600'
     return response
 
