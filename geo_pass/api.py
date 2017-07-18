@@ -322,10 +322,8 @@ def get_way_geom(id):
     geom = g_way_geom(id)
     points = map(lambda n: (float(n.lon), float(n.lat)), geom)
 
-    try:
-        shape = Polygon(points)
-    except ValueError:
-        shape = LineString(points)
+    way = g_way(id)
+    shape = Polygon(points) if is_building(way) else LineString(points)
     response = jsonify({'wkt': dumps(shape)})
     response.headers['Cache-Control'] = 'max-age=3600'
     return response
