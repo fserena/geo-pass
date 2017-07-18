@@ -28,9 +28,7 @@ from flask import Flask, request, jsonify
 from overpy.exception import DataIncomplete
 from flask_cache import Cache
 from shapely.geometry import Point, Polygon
-from shapely.geometry.polygon import orient
 from shapely.wkt import dumps
-import numpy
 
 __author__ = 'Fernando Serena'
 
