@@ -60,6 +60,8 @@ if __name__ == '__main__':
             'bind': '%s:%s' % ('0.0.0.0', str(API_PORT)),
             'workers': 1,
             'threads': number_of_workers(),
+            'errorlog': '-',
+            'accesslog': '-'
         }
         StandaloneApplication(options).run()
     except (KeyboardInterrupt, SystemExit, SystemError):
