@@ -4,4 +4,5 @@ LatLon
 overpy
 gunicorn
 futures
+shapely
 

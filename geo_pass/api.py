@@ -27,6 +27,10 @@ from LatLon import LatLon
 from flask import Flask, request, jsonify
 from overpy.exception import DataIncomplete
 from flask_cache import Cache
+from shapely.geometry import Point, Polygon
+from shapely.geometry.polygon import orient
+from shapely.wkt import dumps
+import numpy
 
 __author__ = 'Fernando Serena'
 
@@ -184,7 +188,7 @@ def query_intersect_ways(id, around, lat=None, lon=None, radius=None):
 def query_node_building(node):
     result = api.query("""
         node({});
-        way(around:2)[building]["building"!~"no"];
+        way(around:10)[building]["building"!~"no"];
         (._; >;);
         out geom;""".format(node['id']))
     for w in result.ways:
@@ -215,8 +219,17 @@ def query_around(id, way=True, lat=None, lon=None, radius=None):
         out ids;        
     """.format(type, id, radius, lat, lon))
     elements = list(result.ways) + list(result.nodes)
-    print len(elements)
     return map(lambda x: x.id, elements)
+
+
+@cache.memoize(3600)
+def query_nodes(*nodes):
+    q_nodes = map(lambda x: 'node({});'.format(x), nodes)
+    result = api.query("""
+        ({});
+        out;""".format('\n'.join(q_nodes)))
+
+    return list(result.nodes)
 
 
 def transform(f):
@@ -230,8 +243,8 @@ def transform(f):
             if elm.attributes:
                 data.update(elm.attributes)
             if isinstance(elm, overpy.Way):
+                data['nd'] = elm._node_ids
                 if is_building(data):
-                    data['nd'] = elm._node_ids
                     if elm.center_lat:
                         data['center'] = {'lat': float(elm.center_lat), 'lon': float(elm.center_lon)}
             else:
@@ -249,6 +262,15 @@ def g_way(id):
                 out center;            
             """.format(id))
     return list(center.ways)
+
+
+def g_way_geom(id):
+    geom = api.query("""
+                way({});
+                (._; >;);
+                out geom;
+            """.format(id))
+    return list(geom.ways).pop().nodes
 
 
 @transform
@@ -290,7 +312,22 @@ def get_way(id):
                 else:
                     surr.append('way/{}'.format(w.id))
 
+    del way['nd']
     response = jsonify(way)
+    response.headers['Cache-Control'] = 'max-age=3600'
+    return response
+
+
+@app.route('/way/<id>/geom')
+@cache.cached(timeout=3600, key_prefix=make_cache_key)
+def get_way_geom(id):
+    geom = g_way_geom(id)
+    points = map(lambda n: (float(n.lon), float(n.lat)), geom)
+
+    polygon = Polygon(points)
+    # polygon = Polygon(polygon.exterior.coords)
+    # polygon = orient(polygon)
+    response = jsonify({'wkt': dumps(polygon)})
     response.headers['Cache-Control'] = 'max-age=3600'
     return response
 
@@ -315,6 +352,16 @@ def get_node(id):
         if n_building:
             node['building'] = 'way/{}'.format(n_building.id)
     response = jsonify(node)
+    response.headers['Cache-Control'] = 'max-age=3600'
+    return response
+
+
+@app.route('/node/<id>/geom')
+@cache.cached(timeout=3600, key_prefix=make_tags_cache_key)
+def get_node_geom(id):
+    node = g_node(id)
+    point = Point(node['lon'], node['lat'])
+    response = jsonify({'wkt': dumps(point)})
     response.headers['Cache-Control'] = 'max-age=3600'
     return response
 
