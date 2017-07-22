@@ -289,6 +289,11 @@ def get_way(id):
     tags = request.args.get('tags')
     tags = tags is not None
 
+    if any([lat, lng, radius]):
+        lat = float(lat)
+        lng = float(lng)
+        radius = float(radius)
+
     way = g_way(id)
     if not tags:
         around = query_around(id, lat=lat, lon=lng, radius=radius) if radius else None

@@ -58,8 +58,8 @@ if __name__ == '__main__':
     try:
         options = {
             'bind': '%s:%s' % ('0.0.0.0', str(API_PORT)),
-            'workers': 1,
-            'threads': number_of_workers() / 2,
+            'workers': number_of_workers(),
+            'threads': 1,
             'workerconnections': 1000,
             'workerclass': 'gthread',
             'errorlog': '-',
