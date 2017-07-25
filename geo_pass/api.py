@@ -36,6 +36,7 @@ app = Flask(__name__)
 cache = Cache(app, config={'CACHE_TYPE': 'filesystem', 'CACHE_DIR': 'cache'})
 api = overpy.Overpass(url=os.environ.get('OVERPASS_API_URL', 'http://localhost:5001/api/interpreter'))
 
+MAX_AGE = int(os.environ.get('MAX_AGE', 86400))
 
 def make_cache_key(*args, **kwargs):
     path = request.path
@@ -76,19 +77,19 @@ def node_distance(node, point):
     return point.distance(node_ll)
 
 
-@cache.memoize(3600)
+@cache.memoize(MAX_AGE)
 def is_road(way):
     tags = way['tag']
     return 'highway' in tags or 'footway' in tags
 
 
-@cache.memoize(3600)
+@cache.memoize(MAX_AGE)
 def is_building(way):
     tags = way['tag']
     return 'building' in tags and tags['building'] != 'no'
 
 
-@cache.memoize(3600)
+@cache.memoize(MAX_AGE)
 def query_way_buildings(id, around):
     if around:
         query = """
@@ -105,7 +106,7 @@ def query_way_buildings(id, around):
     return filter(lambda w: w.id != int(id) and (around is None or w.id in around), result.ways)
 
 
-@cache.memoize(3600)
+@cache.memoize(MAX_AGE)
 def query_way_lamps(id, around):
     if around:
         query = """
@@ -122,7 +123,7 @@ def query_way_lamps(id, around):
     return filter(lambda w: w.id != int(id) and (around is None or w.id in around), result.nodes)
 
 
-@cache.memoize(3600)
+@cache.memoize(MAX_AGE)
 def query_building_ways(id, around):
     result = api.query("""
         way({});
@@ -136,7 +137,7 @@ def query_building_ways(id, around):
     return filter(lambda w: w.id != int(id) and (around is None or w.id in around), result.ways)
 
 
-@cache.memoize(3600)
+@cache.memoize(MAX_AGE)
 def query_building_shops(way):
     result = api.query("""way({}); out geom; >; out body;""".format(way['id']))
     poly = ["{} {}".format(result.get_node(n).lat, result.get_node(n).lon) for n in way['nd']]
@@ -151,7 +152,7 @@ def query_building_shops(way):
     return result.nodes
 
 
-@cache.memoize(3600)
+@cache.memoize(MAX_AGE)
 def query_surrounding_buildings(id, around):
     result = api.query("""
         way({});
@@ -164,7 +165,7 @@ def query_surrounding_buildings(id, around):
     return filter(lambda w: w.id != int(id) and (around is None or w.id in around), result.ways)
 
 
-@cache.memoize(3600)
+@cache.memoize(MAX_AGE)
 def query_intersect_ways(id, around, lat=None, lon=None, radius=None):
     if radius:
         f = '> -> .wn; node.wn(around:{},{},{})'.format(radius, lat, lon)
@@ -182,7 +183,7 @@ def query_intersect_ways(id, around, lat=None, lon=None, radius=None):
     return filter(lambda w: w.id != int(id) and (around is None or w.id in around), result.ways)
 
 
-@cache.memoize(3600)
+@cache.memoize(MAX_AGE)
 def query_node_building(node):
     result = api.query("""
         node({});
@@ -202,7 +203,7 @@ def query_node_building(node):
             return w
 
 
-@cache.memoize(3600)
+@cache.memoize(MAX_AGE)
 def query_around(id, way=True, lat=None, lon=None, radius=None):
     type = 'way' if way else 'node'
     result = api.query("""
@@ -220,7 +221,7 @@ def query_around(id, way=True, lat=None, lon=None, radius=None):
     return map(lambda x: x.id, elements)
 
 
-@cache.memoize(3600)
+@cache.memoize(MAX_AGE)
 def query_nodes(*nodes):
     q_nodes = map(lambda x: 'node({});'.format(x), nodes)
     result = api.query("""
@@ -281,7 +282,7 @@ def g_node(id):
 
 
 @app.route('/way/<id>')
-@cache.cached(timeout=3600, key_prefix=make_cache_key)
+@cache.cached(timeout=MAX_AGE, key_prefix=make_cache_key)
 def get_way(id):
     lat = request.args.get('lat')
     lng = request.args.get('lng')
@@ -317,12 +318,12 @@ def get_way(id):
 
     del way['nd']
     response = jsonify(way)
-    response.headers['Cache-Control'] = 'max-age=3600'
+    response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
     return response
 
 
 @app.route('/way/<id>/geom')
-@cache.cached(timeout=3600, key_prefix=make_cache_key)
+@cache.cached(timeout=MAX_AGE, key_prefix=make_cache_key)
 def get_way_geom(id):
     geom = g_way_geom(id)
     points = map(lambda n: (float(n.lon), float(n.lat)), geom)
@@ -330,7 +331,7 @@ def get_way_geom(id):
     way = g_way(id)
     shape = Polygon(points) if is_building(way) else LineString(points)
     response = jsonify({'wkt': dumps(shape)})
-    response.headers['Cache-Control'] = 'max-age=3600'
+    response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
     return response
 
 
@@ -343,7 +344,7 @@ def _process_rel_member(m):
 
 
 @app.route('/node/<id>')
-@cache.cached(timeout=3600, key_prefix=make_tags_cache_key)
+@cache.cached(timeout=MAX_AGE, key_prefix=make_tags_cache_key)
 def get_node(id):
     node = g_node(id)
     tags = request.args.get('tags')
@@ -354,33 +355,33 @@ def get_node(id):
         if n_building:
             node['building'] = 'way/{}'.format(n_building.id)
     response = jsonify(node)
-    response.headers['Cache-Control'] = 'max-age=3600'
+    response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
     return response
 
 
 @app.route('/node/<id>/geom')
-@cache.cached(timeout=3600, key_prefix=make_tags_cache_key)
+@cache.cached(timeout=MAX_AGE, key_prefix=make_tags_cache_key)
 def get_node_geom(id):
     node = g_node(id)
     point = Point(node['lon'], node['lat'])
     response = jsonify({'wkt': dumps(point)})
-    response.headers['Cache-Control'] = 'max-age=3600'
+    response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
     return response
 
 
 @app.route('/area/<id>')
-@cache.cached(timeout=3600, key_prefix=make_cache_key)
+@cache.cached(timeout=MAX_AGE, key_prefix=make_cache_key)
 def get_area(id):
     result = api.query("""area({}); out meta;""".format(id))
     area = result.areas.pop()
 
     response = jsonify(area.tags)
-    response.headers['Cache-Control'] = 'max-age=3600'
+    response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
     return response
 
 
 @app.route('/elements')
-@cache.cached(timeout=3600, key_prefix=make_cache_key)
+@cache.cached(timeout=MAX_AGE, key_prefix=make_cache_key)
 def get_geo_elements():
     lat = float(request.args.get('lat'))
     lng = float(request.args.get('lng'))
@@ -469,7 +470,7 @@ def get_geo_elements():
         elms_dict['country'] = country
 
     response = jsonify(elms_dict)
-    response.headers['Cache-Control'] = 'max-age=3600'
+    response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
     return response
 
 
