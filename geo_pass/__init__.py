@@ -18,5 +18,37 @@
   limitations under the License.
 #-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=#
 """
+import os
+
+import sys
+import requests
 
 __author__ = 'Fernando Serena'
+
+google_api_key = os.environ.get('GOOGLE_API_KEY', None)
+if google_api_key is None:
+    sys.exit(-1)
+
+
+def geocoding(address):
+    response = requests.get(
+        u'https://maps.googleapis.com/maps/api/geocode/json?address={}&key='.format(
+            address, google_api_key))
+
+    if response.status_code == 200:
+        try:
+            result = response.json().get('results').pop()
+            location = result['geometry']['location']
+            # print 'geocoding done.'
+            return location
+        except IndexError:
+            pass
+
+
+def streetview(lat, lng):
+    response = requests.get(
+        u'https://maps.googleapis.com/maps/api/streetview?size=600x300&location={},{}&key={}'.format(
+            lat, lng, google_api_key))
+
+    if response.status_code == 200:
+        return response.content

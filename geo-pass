@@ -61,6 +61,7 @@ if __name__ == '__main__':
             'workers': number_of_workers(),
             'threads': 1,
             'workerconnections': 1000,
+            'timeout': 4000,
             'workerclass': 'gthread',
             'errorlog': '-',
             'accesslog': '-'

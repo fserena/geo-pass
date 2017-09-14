@@ -30,13 +30,16 @@ from flask_cache import Cache
 from shapely.geometry import Point, Polygon, LineString
 from shapely.wkt import dumps
 
+from geo_pass import geocoding
+
 __author__ = 'Fernando Serena'
 
 app = Flask(__name__)
-cache = Cache(app, config={'CACHE_TYPE': 'filesystem', 'CACHE_DIR': 'cache'})
+cache = Cache(app, config={'CACHE_TYPE': 'filesystem', 'CACHE_DIR': 'cache', 'CACHE_THRESHOLD': 100000})
 api = overpy.Overpass(url=os.environ.get('OVERPASS_API_URL', 'http://localhost:5001/api/interpreter'))
 
 MAX_AGE = int(os.environ.get('MAX_AGE', 86400))
+
 
 def make_cache_key(*args, **kwargs):
     path = request.path
@@ -86,7 +89,7 @@ def is_road(way):
 @cache.memoize(MAX_AGE)
 def is_building(way):
     tags = way['tag']
-    return 'building' in tags and tags['building'] != 'no'
+    return 'amenity' in tags or ('building' in tags and tags['building'] != 'no')
 
 
 @cache.memoize(MAX_AGE)
@@ -107,18 +110,24 @@ def query_way_buildings(id, around):
 
 
 @cache.memoize(MAX_AGE)
-def query_way_lamps(id, around):
+def query_way_elms(id, around):
     if around:
         query = """
         way({});
-        node(around:20)[highway=street_lamp][lit]["lit"!~"no"];        
-        out ids;
+        (
+         node(around:20)[highway];
+         node(around:20)[footway];
+        );
+        out;
         """.format(id)
     else:
         query = """
         way({});
-        node(around:20)[highway=street_lamp][lit]["lit"!~"no"];        
-        out ids;""".format(id)
+        (
+         node(around:20)[highway];
+         node(around:20)[footway];
+        );        
+        out;""".format(id)
     result = api.query(query)
     return filter(lambda w: w.id != int(id) and (around is None or w.id in around), result.nodes)
 
@@ -138,18 +147,26 @@ def query_building_ways(id, around):
 
 
 @cache.memoize(MAX_AGE)
-def query_building_shops(way):
+def query_building_elms(way):
     result = api.query("""way({}); out geom; >; out body;""".format(way['id']))
-    poly = ["{} {}".format(result.get_node(n).lat, result.get_node(n).lon) for n in way['nd']]
-    poly = ' '.join(poly)
+
+    points = [(float(result.get_node(n).lon), float(result.get_node(n).lat)) for n in way['nd']]
+    shape = Polygon(points).envelope
+
     result = api.query("""
-        node(poly:"{}") -> .in;
+        way({});
+        node(around:5) -> .na;
         (
-            node.in[shop];            
-        );
-        out ids;
-        """.format(poly))
-    return result.nodes
+           node.na[shop];
+           node.na[amenity];
+        );                
+        out;
+        """.format(way['id']))
+
+    for n in result.nodes:
+        n_point = Point(float(n.lon), float(n.lat))
+        if n_point.within(shape):
+            yield n
 
 
 @cache.memoize(MAX_AGE)
@@ -190,16 +207,12 @@ def query_node_building(node):
         way(around:10)[building]["building"!~"no"];
         (._; >;);
         out geom;""".format(node['id']))
+    point = Point(node['lon'], node['lat'])
     for w in result.ways:
-        poly = ["{} {}".format(n.lat, n.lon) for n in w.nodes]
-        poly = ' '.join(poly)
-        result = api.query("""
-            node(poly:"{}") -> .in;
-            node({}) -> .n;
-            node.in.n;            
-            out ids;
-            """.format(poly, node['id']))
-        if result.nodes:
+        geom = w.nodes
+        points = map(lambda n: [float(n.lon), float(n.lat)], geom)
+        shape = Polygon(points)
+        if point.within(shape.envelope):
             return w
 
 
@@ -211,6 +224,7 @@ def query_around(id, way=True, lat=None, lon=None, radius=None):
         (node(around:{},{},{}); <;) -> .all;
         (node.all[highway];
          node.all[shop];
+         node.all[amenity];
          way.all[highway];
          way.all[footway];
          way.all[building];
@@ -303,13 +317,33 @@ def get_way(id):
                                    query_way_buildings(id, around))
             way['intersect'] = map(lambda x: 'way/{}'.format(x.id),
                                    query_intersect_ways(id, around))
-            way['lamps'] = map(lambda x: 'node/{}'.format(x.id),
-                               query_way_lamps(id, around))
+
+            for node in query_way_elms(id, around):
+                if 'contains' not in way:
+                    way['contains'] = []
+                n_key = _elm_key(node, MATCH_TAGS)
+                if n_key is None:
+                    n_key = 'node'
+                way['contains'].append({
+                    'id': 'node/{}'.format(node.id),
+                    'type': n_key
+                })
+
         elif is_building(way):
-            way['shops'] = map(lambda x: 'node/{}'.format(x.id), query_building_shops(way))
+            for node in query_building_elms(way):
+                if 'contains' not in way:
+                    way['contains'] = []
+                n_key = _elm_key(node, MATCH_TAGS)
+                if n_key is None:
+                    n_key = 'node'
+                way['contains'].append({
+                    'id': 'node/{}'.format(node.id),
+                    'type': n_key
+                })
+
             way['ways'] = map(lambda x: 'way/{}'.format(x.id), query_building_ways(id, around))
             surr = []
-            way['surrounding'] = surr
+            way['surrounding_buildings'] = surr
             for w in query_surrounding_buildings(id, around):
                 if w.id == int(id):
                     way['center'] = {'lat': float(w.center_lat), 'lon': float(w.center_lon)}
@@ -380,30 +414,37 @@ def get_area(id):
     return response
 
 
+def _elm_key(elm, match=set()):
+    key = None
+    matching_tags = list(set(match).intersection(set(elm.tags.keys())))
+    try:
+        tag = matching_tags.pop()
+        key = '{}:{}'.format(tag, elm.tags[tag])
+    except IndexError:
+        pass
+
+    return key
+
+
+MATCH_TAGS = {'shop', 'highway', 'amenity', 'building'}
+
+
 @app.route('/elements')
 @cache.cached(timeout=MAX_AGE, key_prefix=make_cache_key)
 def get_geo_elements():
-    lat = float(request.args.get('lat'))
-    lng = float(request.args.get('lng'))
+    location = request.args.get('location')
+    if location:
+        ll = geocoding(location)
+        lat, lng = ll['lat'], ll['lng']
+    else:
+        lat = float(request.args.get('lat'))
+        lng = float(request.args.get('lng'))
     radius = int(request.args.get('radius', 200))
     limit = request.args.get('limit', None)
     if limit:
         limit = int(limit)
 
     poi = LatLon(lat, lng)
-
-    # osm_result = api.query("""
-    #     way(around:{},{},{}) -> .wa;
-    #     node(around:{},{},{}) -> .na;
-    #     (
-    #         way.wa[highway]; >;
-    #         way.wa[footway]; >;
-    #         way.wa[building]["building"!~"no"]; >;
-    #         node.na[shop];
-    #         node.na[highway=street_lamp];
-    #     );
-    #     out geom;
-    #     """.format(radius, lat, lng, radius, lat, lng))
 
     osm_result = api.query("""
         node(around:{},{},{}) -> .na;
@@ -413,63 +454,66 @@ def get_geo_elements():
             way.wa[footway];
             way.wa[building]["building"!~"no"];
             node.na[shop];
-            node.na[highway=street_lamp];
+            node.na[amenity];
+            node.na[highway];
         );        
-        out;
+        out geom;
         """.format(radius, lat, lng, radius, lat, lng))
 
-    buildings = []
-    ways = []
-    shops = []
-    lamps = []
+    elms = []
 
-    for i, node in enumerate(
-            filter(lambda x: 'shop' in x.tags or x.tags.get('highway', '') == 'street_lamp', osm_result.nodes)):
+    for i, node in enumerate(osm_result.nodes):
         elm = {'id': 'node/{}'.format(node.id), 'distance': node_distance(node, poi)}
-        if 'shop' in node.tags:
-            shops.append(elm)
-        else:
-            lamps.append(elm)
+        key = _elm_key(node, MATCH_TAGS)
+        if key is None:
+            key = 'node'
+        if 'name' in node.tags:
+            elm['name'] = node.tags['name']
+        elm['type'] = 'node:' + key
+        elms.append(elm)
 
         if limit and i == limit - 1:
             break
 
     for i, way in enumerate(osm_result.ways):
         elm = {'id': 'way/{}'.format(way.id), 'distance': way_distance(osm_result, way, poi)}
-        if 'building' in way.tags:
-            buildings.append(elm)
-        else:
-            ways.append(elm)
+        key = _elm_key(way, MATCH_TAGS)
+        if key is None:
+            key = 'way'
+        if 'name' in way.tags:
+            elm['name'] = way.tags['name']
+        elm['type'] = 'way:' + key
+        elms.append(elm)
 
         if limit and i == limit - 1:
             break
 
-    municipality = None
-    province = None
-    country = None
     osm_result = api.query("""
           is_in({},{}) -> .a;
-          area.a[wikidata][admin_level];
+          area.a[admin_level];
           out;""".format(lat, lng))
     for area in osm_result.areas:
         a = 'area/{}'.format(area.id)
         admin_level = int(area.tags['admin_level'])
+        type = 'area'
         if admin_level == 4:
-            province = a
+            type = 'province'
         elif admin_level == 8:
-            municipality = a
+            type = 'municipality'
         elif admin_level == 2:
-            country = a
+            type = 'country'
+        elm = {'id': a, 'type': type}
+        elms.append(elm)
 
-    elms_dict = {'buildings': buildings, 'ways': ways, 'shops': shops, 'lamps': lamps}
-    if municipality:
-        elms_dict['municipality'] = municipality
-    if province:
-        elms_dict['province'] = province
-    if country:
-        elms_dict['country'] = country
+    result = {
+        'center': {
+            'lat': float(poi.lat),
+            'lng': float(poi.lon)
+        },
+        'results': elms
+    }
 
-    response = jsonify(elms_dict)
+    response = jsonify(result)
     response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
     return response
 
