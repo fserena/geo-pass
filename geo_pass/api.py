@@ -159,6 +159,7 @@ def query_building_elms(way):
         (
            node.na[shop];
            node.na[amenity];
+           node.na[tourism];
         );                
         out;
         """.format(way['id']))
@@ -225,6 +226,7 @@ def query_around(id, way=True, lat=None, lon=None, radius=None):
         (node.all[highway];
          node.all[shop];
          node.all[amenity];
+         node.all[tourism];
          way.all[highway];
          way.all[footway];
          way.all[building];
@@ -426,7 +428,7 @@ def _elm_key(elm, match=set()):
     return key
 
 
-MATCH_TAGS = {'shop', 'highway', 'amenity', 'building'}
+MATCH_TAGS = {'shop', 'highway', 'amenity', 'building', 'tourism'}
 
 
 @app.route('/elements')
@@ -456,6 +458,7 @@ def get_geo_elements():
             node.na[shop];
             node.na[amenity];
             node.na[highway];
+            node.na[tourism];
         );        
         out geom;
         """.format(radius, lat, lng, radius, lat, lng))
