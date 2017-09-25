@@ -18,27 +18,41 @@
   limitations under the License.
 #-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=#
 """
+import calendar
 import os
 import sys
+from datetime import datetime
 from functools import wraps
 
 import overpy
+import shapely
 from LatLon import LatLon
 from flask import Flask, request, jsonify
 from overpy.exception import DataIncomplete
 from flask_cache import Cache
 from shapely.geometry import Point, Polygon, LineString
 from shapely.wkt import dumps
-
+from redis_cache import cache_it_json
 from geo_pass import geocoding
 
 __author__ = 'Fernando Serena'
 
-app = Flask(__name__)
-cache = Cache(app, config={'CACHE_TYPE': 'filesystem', 'CACHE_DIR': 'cache', 'CACHE_THRESHOLD': 100000})
-api = overpy.Overpass(url=os.environ.get('OVERPASS_API_URL', 'http://localhost:5001/api/interpreter'))
-
 MAX_AGE = int(os.environ.get('MAX_AGE', 86400))
+CACHE_LIMIT = int(os.environ.get('CACHE_LIMIT', 10000))
+CACHE_REDIS_HOST = os.environ.get('CACHE_REDIS_HOST', 'localhost')
+CACHE_REDIS_DB = int(os.environ.get('CACHE_REDIS_DB', 0))
+CACHE_REDIS_PORT = int(os.environ.get('CACHE_REDIS_PORT', 6379))
+
+app = Flask(__name__)
+cache = Cache(app, config={
+    'CACHE_TYPE': 'redis',
+    'CACHE_KEY_PREFIX': 'geo',
+    'CACHE_REDIS_HOST': CACHE_REDIS_HOST,
+    'CACHE_REDIS_DB': CACHE_REDIS_DB,
+    'CACHE_REDIS_PORT': CACHE_REDIS_PORT
+})
+
+api = overpy.Overpass(url=os.environ.get('OVERPASS_API_URL', 'http://localhost:5001/api/interpreter'))
 
 
 def make_cache_key(*args, **kwargs):
@@ -56,9 +70,7 @@ def make_around_cache_key(*args, **kwargs):
 
 def make_tags_cache_key(*args, **kwargs):
     path = request.path
-    qargs = dict(request.args.items())
-    args = 'tags' + ''.join(['{}{}'.format(k, qargs[k]) for k in sorted(qargs.keys())])
-    return (path + args).encode('utf-8')
+    return path.encode('utf-8')
 
 
 def way_distance(result, way, point):
@@ -80,60 +92,44 @@ def node_distance(node, point):
     return point.distance(node_ll)
 
 
-@cache.memoize(MAX_AGE)
+@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
 def is_road(way):
     tags = way['tag']
     return 'highway' in tags or 'footway' in tags
 
 
-@cache.memoize(MAX_AGE)
+@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
 def is_building(way):
     tags = way['tag']
     return 'amenity' in tags or ('building' in tags and tags['building'] != 'no')
 
 
-@cache.memoize(MAX_AGE)
-def query_way_buildings(id, around):
-    if around:
-        query = """
-        way({});
-        way(around:20)[building]["building"!~"no"];                
-        out ids;
-        """.format(id)
-    else:
-        query = """
-         way({});
-        way(around:20)[building]["building"!~"no"];        
-        out ids;""".format(id)
+@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+def query_way_buildings(id):
+    query = """
+     way({});
+    way(around:20)[building]["building"!~"no"];        
+    out center;""".format(id)
     result = api.query(query)
-    return filter(lambda w: w.id != int(id) and (around is None or w.id in around), result.ways)
+    return map(lambda x: {'id': x.id, 'center_lat': float(x.center_lat), 'center_lon': float(x.center_lon)},
+               filter(lambda w: w.id != int(id), result.ways))
 
 
-@cache.memoize(MAX_AGE)
-def query_way_elms(id, around):
-    if around:
-        query = """
-        way({});
-        (
-         node(around:20)[highway];
-         node(around:20)[footway];
-        );
-        out;
-        """.format(id)
-    else:
-        query = """
-        way({});
-        (
-         node(around:20)[highway];
-         node(around:20)[footway];
-        );        
-        out;""".format(id)
+@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+def query_way_elms(id):
+    query = """
+    way({});
+    (
+     node(around:20)[highway];
+     node(around:20)[footway];
+    );        
+    out body;""".format(id)
     result = api.query(query)
-    return filter(lambda w: w.id != int(id) and (around is None or w.id in around), result.nodes)
+    return map(lambda x: {'id': x.id, 'lat': float(x.lat), 'lon': float(x.lon), 'tags': x.tags}, result.nodes)
 
 
-@cache.memoize(MAX_AGE)
-def query_building_ways(id, around):
+@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+def query_building_ways(id):
     result = api.query("""
         way({});
         way(around:20) -> .aw;                
@@ -142,11 +138,11 @@ def query_building_ways(id, around):
           way.aw[footway];
         );
         out ids;
-        """.format(id, around))
-    return filter(lambda w: w.id != int(id) and (around is None or w.id in around), result.ways)
+        """.format(id))
+    return map(lambda x: {'id': x.id}, filter(lambda w: w.id != int(id), result.ways))
 
 
-@cache.memoize(MAX_AGE)
+@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
 def query_building_elms(way):
     result = api.query("""way({}); out geom; >; out body;""".format(way['id']))
 
@@ -164,14 +160,18 @@ def query_building_elms(way):
         out;
         """.format(way['id']))
 
+    elms = []
+
     for n in result.nodes:
         n_point = Point(float(n.lon), float(n.lat))
         if n_point.within(shape):
-            yield n
+            elms.append({'id': n.id, 'lat': float(n.lat), 'lon': float(n.lon), 'tags': n.tags})
+
+    return elms
 
 
-@cache.memoize(MAX_AGE)
-def query_surrounding_buildings(id, around):
+@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+def query_surrounding_buildings(id):
     result = api.query("""
         way({});
         out center;
@@ -179,29 +179,37 @@ def query_surrounding_buildings(id, around):
         node(around:10) -> .ar;
         node.ar.wn;
         <;        
-        out ids;""".format(id, around))
-    return filter(lambda w: w.id != int(id) and (around is None or w.id in around), result.ways)
+        out center;""".format(id))
+    return map(lambda x: {'id': x.id, 'center_lat': float(x.center_lat), 'center_lon': float(x.center_lon)},
+               filter(lambda w: w.id != int(id), result.ways))
 
 
-@cache.memoize(MAX_AGE)
-def query_intersect_ways(id, around, lat=None, lon=None, radius=None):
-    if radius:
-        f = '> -> .wn; node.wn(around:{},{},{})'.format(radius, lat, lon)
-    else:
-        f = '>'
+@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+def query_intersect_ways(id):
     result = api.query("""
     way({});
-    {};
+    >;
+    out body;
     < -> .wall;
     (
         way.wall[highway];
         way.wall[footway];
     );    
-    out ids;""".format(id, f))
-    return filter(lambda w: w.id != int(id) and (around is None or w.id in around), result.ways)
+    out geom;""".format(id))
+    node_ids = set(map(lambda x: x.id, result.nodes))
+    ways = filter(lambda w: w.id != int(id), result.ways)
+
+    intersections = {}
+
+    for w in ways:
+        cuts = set(w._node_ids).intersection(node_ids)
+        if cuts:
+            intersections[w.id] = list(cuts)
+
+    return intersections
 
 
-@cache.memoize(MAX_AGE)
+@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
 def query_node_building(node):
     result = api.query("""
         node({});
@@ -214,10 +222,10 @@ def query_node_building(node):
         points = map(lambda n: [float(n.lon), float(n.lat)], geom)
         shape = Polygon(points)
         if point.within(shape.envelope):
-            return w
+            return {'id': w.id}
 
 
-@cache.memoize(MAX_AGE)
+@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
 def query_around(id, way=True, lat=None, lon=None, radius=None):
     type = 'way' if way else 'node'
     result = api.query("""
@@ -237,7 +245,7 @@ def query_around(id, way=True, lat=None, lon=None, radius=None):
     return map(lambda x: x.id, elements)
 
 
-@cache.memoize(MAX_AGE)
+@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
 def query_nodes(*nodes):
     q_nodes = map(lambda x: 'node({});'.format(x), nodes)
     result = api.query("""
@@ -248,6 +256,11 @@ def query_nodes(*nodes):
 
 
 def transform(f):
+    def transform_value(v):
+        if isinstance(v, datetime):
+            return calendar.timegm(v.timetuple())
+        return v
+
     @wraps(f)
     def wrapper(*args, **kwargs):
         data = {}
@@ -256,7 +269,7 @@ def transform(f):
             if elm.tags:
                 data['tag'] = elm.tags
             if elm.attributes:
-                data.update(elm.attributes)
+                data.update({k: transform_value(elm.attributes[k]) for k in elm.attributes})
             if isinstance(elm, overpy.Way):
                 data['nd'] = elm._node_ids
                 if is_building(data):
@@ -270,6 +283,7 @@ def transform(f):
     return wrapper
 
 
+@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
 @transform
 def g_way(id):
     center = api.query("""
@@ -288,6 +302,7 @@ def g_way_geom(id):
     return list(geom.ways).pop().nodes
 
 
+@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
 @transform
 def g_node(id):
     result = api.query("""
@@ -297,11 +312,30 @@ def g_node(id):
     return list(result.nodes)
 
 
+@cache.memoize(MAX_AGE)
+def g_node_position(id):
+    r = api.query("""
+        node({});
+        out;
+    """.format(id))
+    node = list(r.nodes).pop()
+    return node.lat, node.lon
+
+
+def nodes_in_buffer(nodes, buffer):
+    for n in nodes:
+        n_lat, n_lon = g_node_position(n)
+        p = Point(float(n_lon), float(n_lat))
+        if p.within(buffer):
+            return True
+    return False
+
+
 @app.route('/way/<id>')
 @cache.cached(timeout=MAX_AGE, key_prefix=make_cache_key)
 def get_way(id):
-    lat = request.args.get('lat')
-    lng = request.args.get('lng')
+    lat = float(request.args.get('lat'))
+    lng = float(request.args.get('lng'))
     radius = request.args.get('radius')
     tags = request.args.get('tags')
     tags = tags is not None
@@ -312,45 +346,61 @@ def get_way(id):
         radius = float(radius)
 
     way = g_way(id)
+    poi = LatLon(lat, lng)
+    if radius is None:
+        radius = 10.0
+    r_p = poi.offset(90, radius / 1000.0)
+    buffer = Point(lng, lat).buffer(abs((float(r_p.lon) - float(poi.lon))), resolution=5, mitre_limit=1.0)
+    buffer = shapely.affinity.scale(buffer, 1.0, 0.75)
     if not tags:
-        around = query_around(id, lat=lat, lon=lng, radius=radius) if radius else None
         if is_road(way):
-            way['buildings'] = map(lambda x: 'way/{}'.format(x.id),
-                                   query_way_buildings(id, around))
-            way['intersect'] = map(lambda x: 'way/{}'.format(x.id),
-                                   query_intersect_ways(id, around))
+            all_w_buildings = query_way_buildings(id)
+            w_buildings = filter(lambda x: Point(x['center_lon'], x['center_lat']).within(buffer), all_w_buildings)
 
-            for node in query_way_elms(id, around):
-                if 'contains' not in way:
-                    way['contains'] = []
-                n_key = _elm_key(node, MATCH_TAGS)
-                if n_key is None:
-                    n_key = 'node'
-                way['contains'].append({
-                    'id': 'node/{}'.format(node.id),
-                    'type': n_key
-                })
+            way['buildings'] = map(lambda x: 'way/{}'.format(x['id']),
+                                   w_buildings)
+
+            all_intersects = query_intersect_ways(id)
+            w_intersects = filter(lambda (w, cuts): nodes_in_buffer(cuts, buffer), all_intersects.items())
+            way['intersect'] = map(lambda x: 'way/{}'.format(x[0]), w_intersects)
+
+            for node in query_way_elms(id):
+                p = Point(node['lon'], node['lat'])
+                if p.within(buffer):
+                    if 'contains' not in way:
+                        way['contains'] = []
+                    n_key = _elm_key(node, MATCH_TAGS)
+                    if n_key is None:
+                        n_key = 'node'
+                    way['contains'].append({
+                        'id': 'node/{}'.format(node['id']),
+                        'type': n_key
+                    })
 
         elif is_building(way):
             for node in query_building_elms(way):
-                if 'contains' not in way:
-                    way['contains'] = []
-                n_key = _elm_key(node, MATCH_TAGS)
-                if n_key is None:
-                    n_key = 'node'
-                way['contains'].append({
-                    'id': 'node/{}'.format(node.id),
-                    'type': n_key
-                })
+                p = Point(node['lon'], node['lat'])
+                if p.within(buffer):
+                    if 'contains' not in way:
+                        way['contains'] = []
+                    n_key = _elm_key(node, MATCH_TAGS)
+                    if n_key is None:
+                        n_key = 'node'
+                    way['contains'].append({
+                        'id': 'node/{}'.format(node['id']),
+                        'type': n_key
+                    })
 
-            way['ways'] = map(lambda x: 'way/{}'.format(x.id), query_building_ways(id, around))
+            way['ways'] = map(lambda x: 'way/{}'.format(x['id']), query_building_ways(id))
             surr = []
             way['surrounding_buildings'] = surr
-            for w in query_surrounding_buildings(id, around):
-                if w.id == int(id):
-                    way['center'] = {'lat': float(w.center_lat), 'lon': float(w.center_lon)}
+            for w in query_surrounding_buildings(id):
+                if w['id'] == int(id):
+                    way['center'] = {'lat': w['center_lat'], 'lon': w['center_lon']}
                 else:
-                    surr.append('way/{}'.format(w.id))
+                    p = Point(w['center_lon'], w['center_lat'])
+                    if p.within(buffer):
+                        surr.append('way/{}'.format(w['id']))
 
     del way['nd']
     response = jsonify(way)
@@ -359,7 +409,7 @@ def get_way(id):
 
 
 @app.route('/way/<id>/geom')
-@cache.cached(timeout=MAX_AGE, key_prefix=make_cache_key)
+@cache.cached(timeout=MAX_AGE)
 def get_way_geom(id):
     geom = g_way_geom(id)
     points = map(lambda n: (float(n.lon), float(n.lat)), geom)
@@ -389,7 +439,7 @@ def get_node(id):
     if not tags:
         n_building = query_node_building(node)
         if n_building:
-            node['building'] = 'way/{}'.format(n_building.id)
+            node['building'] = 'way/{}'.format(n_building['id'])
     response = jsonify(node)
     response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
     return response
@@ -418,10 +468,10 @@ def get_area(id):
 
 def _elm_key(elm, match=set()):
     key = None
-    matching_tags = list(set(match).intersection(set(elm.tags.keys())))
+    matching_tags = list(set(match).intersection(set(elm['tags'].keys())))
     try:
         tag = matching_tags.pop()
-        key = '{}:{}'.format(tag, elm.tags[tag])
+        key = '{}:{}'.format(tag, elm['tags'][tag])
     except IndexError:
         pass
 
@@ -467,7 +517,7 @@ def get_geo_elements():
 
     for i, node in enumerate(osm_result.nodes):
         elm = {'id': 'node/{}'.format(node.id), 'distance': node_distance(node, poi)}
-        key = _elm_key(node, MATCH_TAGS)
+        key = _elm_key({'tags': node.tags}, MATCH_TAGS)
         if key is None:
             key = 'node'
         if 'name' in node.tags:
@@ -480,7 +530,7 @@ def get_geo_elements():
 
     for i, way in enumerate(osm_result.ways):
         elm = {'id': 'way/{}'.format(way.id), 'distance': way_distance(osm_result, way, poi)}
-        key = _elm_key(way, MATCH_TAGS)
+        key = _elm_key({'tags': way.tags}, MATCH_TAGS)
         if key is None:
             key = 'way'
         if 'name' in way.tags:

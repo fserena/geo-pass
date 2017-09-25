@@ -6,4 +6,6 @@ gunicorn
 futures
 shapely
 requests
+redis
+redis-simple-cache
 
