@@ -334,39 +334,38 @@ def nodes_in_buffer(nodes, buffer):
 @app.route('/way/<id>')
 @cache.cached(timeout=MAX_AGE, key_prefix=make_cache_key)
 def get_way(id):
-    lat = float(request.args.get('lat'))
-    lng = float(request.args.get('lng'))
+    lat = request.args.get('lat')
+    lng = request.args.get('lng')
     radius = request.args.get('radius')
     tags = request.args.get('tags')
     tags = tags is not None
+    buffer = None
 
     if any([lat, lng, radius]):
         lat = float(lat)
         lng = float(lng)
         radius = float(radius)
+        poi = LatLon(lat, lng)
+        r_p = poi.offset(90, radius / 1000.0)
+        buffer = Point(lng, lat).buffer(abs((float(r_p.lon) - float(poi.lon))), resolution=5, mitre_limit=1.0)
+        buffer = shapely.affinity.scale(buffer, 1.0, 0.75)
 
     way = g_way(id)
-    poi = LatLon(lat, lng)
-    if radius is None:
-        radius = 10.0
-    r_p = poi.offset(90, radius / 1000.0)
-    buffer = Point(lng, lat).buffer(abs((float(r_p.lon) - float(poi.lon))), resolution=5, mitre_limit=1.0)
-    buffer = shapely.affinity.scale(buffer, 1.0, 0.75)
     if not tags:
         if is_road(way):
             all_w_buildings = query_way_buildings(id)
-            w_buildings = filter(lambda x: Point(x['center_lon'], x['center_lat']).within(buffer), all_w_buildings)
+            w_buildings = filter(lambda x: not buffer or Point(x['center_lon'], x['center_lat']).within(buffer), all_w_buildings)
 
             way['buildings'] = map(lambda x: 'way/{}'.format(x['id']),
                                    w_buildings)
 
             all_intersects = query_intersect_ways(id)
-            w_intersects = filter(lambda (w, cuts): nodes_in_buffer(cuts, buffer), all_intersects.items())
+            w_intersects = filter(lambda (w, cuts): not buffer or nodes_in_buffer(cuts, buffer), all_intersects.items())
             way['intersect'] = map(lambda x: 'way/{}'.format(x[0]), w_intersects)
 
             for node in query_way_elms(id):
                 p = Point(node['lon'], node['lat'])
-                if p.within(buffer):
+                if not buffer or p.within(buffer):
                     if 'contains' not in way:
                         way['contains'] = []
                     n_key = _elm_key(node, MATCH_TAGS)
@@ -380,7 +379,7 @@ def get_way(id):
         elif is_building(way):
             for node in query_building_elms(way):
                 p = Point(node['lon'], node['lat'])
-                if p.within(buffer):
+                if not buffer or p.within(buffer):
                     if 'contains' not in way:
                         way['contains'] = []
                     n_key = _elm_key(node, MATCH_TAGS)
@@ -399,7 +398,7 @@ def get_way(id):
                     way['center'] = {'lat': w['center_lat'], 'lon': w['center_lon']}
                 else:
                     p = Point(w['center_lon'], w['center_lat'])
-                    if p.within(buffer):
+                    if not buffer or p.within(buffer):
                         surr.append('way/{}'.format(w['id']))
 
     del way['nd']
