@@ -19,6 +19,8 @@
 #-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=#
 """
 import calendar
+import time
+from wsgiref.handlers import format_date_time
 import os
 import sys
 from datetime import datetime
@@ -30,16 +32,17 @@ from LatLon import LatLon
 from flask import Flask, request, jsonify
 from overpy.exception import DataIncomplete
 from flask_cache import Cache
-from shapely.geometry import Point, Polygon, LineString
+from shapely.geometry import Point, Polygon, LineString, LinearRing, MultiPoint
+from shapely.ops import nearest_points
 from shapely.wkt import dumps
-from redis_cache import cache_it_json
+from redis_cache import cache_it_json, SimpleCache
 from geo_pass import geocoding
 
 __author__ = 'Fernando Serena'
 
 MAX_AGE = int(os.environ.get('MAX_AGE', 86400))
-CACHE_LIMIT = int(os.environ.get('CACHE_LIMIT', 10000))
-CACHE_REDIS_HOST = os.environ.get('CACHE_REDIS_HOST', 'localhost')
+CACHE_LIMIT = int(os.environ.get('CACHE_LIMIT', 100000))
+CACHE_REDIS_HOST = os.environ.get('CACHE_REDIS_HOST', '127.0.0.1')
 CACHE_REDIS_DB = int(os.environ.get('CACHE_REDIS_DB', 0))
 CACHE_REDIS_PORT = int(os.environ.get('CACHE_REDIS_PORT', 6379))
 
@@ -52,7 +55,15 @@ cache = Cache(app, config={
     'CACHE_REDIS_PORT': CACHE_REDIS_PORT
 })
 
-api = overpy.Overpass(url=os.environ.get('OVERPASS_API_URL', 'http://localhost:5001/api/interpreter'))
+# cache = Cache(app, config={
+#     'CACHE_TYPE': 'filesystem',
+#     'CACHE_DIR': 'cache'
+# })
+
+cache_json = SimpleCache(hashkeys=True, host=CACHE_REDIS_HOST, port=CACHE_REDIS_PORT,
+                         db=1, namespace='cjson', limit=100000)
+
+api = overpy.Overpass(url=os.environ.get('OVERPASS_API_URL', 'http://127.0.0.1:5001/api/interpreter'))
 
 
 def make_cache_key(*args, **kwargs):
@@ -92,30 +103,31 @@ def node_distance(node, point):
     return point.distance(node_ll)
 
 
-@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+@cache_it_json(cache=cache_json)
 def is_road(way):
-    tags = way['tag']
+    tags = way.get('tag', {})
     return 'highway' in tags or 'footway' in tags
 
 
-@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+@cache_it_json(cache=cache_json)
 def is_building(way):
-    tags = way['tag']
+    tags = way.get('tag', {})
     return 'amenity' in tags or ('building' in tags and tags['building'] != 'no')
 
 
-@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+@cache_it_json(cache=cache_json)
 def query_way_buildings(id):
     query = """
      way({});
     way(around:20)[building]["building"!~"no"];        
     out center;""".format(id)
     result = api.query(query)
+    all_way_buildings = filter(lambda w: w.id != int(id), result.ways)
     return map(lambda x: {'id': x.id, 'center_lat': float(x.center_lat), 'center_lon': float(x.center_lon)},
-               filter(lambda w: w.id != int(id), result.ways))
+               all_way_buildings)
 
 
-@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+@cache_it_json(cache=cache_json)
 def query_way_elms(id):
     query = """
     way({});
@@ -128,8 +140,12 @@ def query_way_elms(id):
     return map(lambda x: {'id': x.id, 'lat': float(x.lat), 'lon': float(x.lon), 'tags': x.tags}, result.nodes)
 
 
-@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+@cache_it_json(cache=cache_json)
 def query_building_ways(id):
+    def filter_way(w):
+        buildings = query_way_buildings(w.id)
+        return any([b for b in buildings if b['id'] == int(id)])
+
     result = api.query("""
         way({});
         way(around:20) -> .aw;                
@@ -139,10 +155,12 @@ def query_building_ways(id):
         );
         out ids;
         """.format(id))
-    return map(lambda x: {'id': x.id}, filter(lambda w: w.id != int(id), result.ways))
+    all_near_ways = result.ways
+    building_ways = filter(lambda w: filter_way(w), all_near_ways)
+    return map(lambda x: {'id': x.id}, filter(lambda w: w.id != int(id), building_ways))
 
 
-@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+@cache_it_json(cache=cache_json)
 def query_building_elms(way):
     result = api.query("""way({}); out geom; >; out body;""".format(way['id']))
 
@@ -170,7 +188,7 @@ def query_building_elms(way):
     return elms
 
 
-@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+@cache_it_json(cache=cache_json)
 def query_surrounding_buildings(id):
     result = api.query("""
         way({});
@@ -184,7 +202,7 @@ def query_surrounding_buildings(id):
                filter(lambda w: w.id != int(id), result.ways))
 
 
-@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+@cache_it_json(cache=cache_json)
 def query_intersect_ways(id):
     result = api.query("""
     way({});
@@ -209,7 +227,7 @@ def query_intersect_ways(id):
     return intersections
 
 
-@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+@cache_it_json(cache=cache_json)
 def query_node_building(node):
     result = api.query("""
         node({});
@@ -225,7 +243,7 @@ def query_node_building(node):
             return {'id': w.id}
 
 
-@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+@cache_it_json(cache=cache_json)
 def query_around(id, way=True, lat=None, lon=None, radius=None):
     type = 'way' if way else 'node'
     result = api.query("""
@@ -245,7 +263,7 @@ def query_around(id, way=True, lat=None, lon=None, radius=None):
     return map(lambda x: x.id, elements)
 
 
-@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+@cache_it_json(cache=cache_json)
 def query_nodes(*nodes):
     q_nodes = map(lambda x: 'node({});'.format(x), nodes)
     result = api.query("""
@@ -283,7 +301,7 @@ def transform(f):
     return wrapper
 
 
-@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+@cache_it_json(cache=cache_json)
 @transform
 def g_way(id):
     center = api.query("""
@@ -293,16 +311,25 @@ def g_way(id):
     return list(center.ways)
 
 
+def g_coord_area(lat, lon):
+    result = api.query("""
+                is_in({},{});
+                out;
+    """.format(lat, lon))
+    return list(result.area_ids)
+
+
+@cache_it_json(cache=cache_json)
 def g_way_geom(id):
     geom = api.query("""
                 way({});
                 (._; >;);
                 out geom;
             """.format(id))
-    return list(geom.ways).pop().nodes
+    return map(lambda n: (float(n.lon), float(n.lat)), list(geom.ways).pop().nodes)
 
 
-@cache_it_json(limit=CACHE_LIMIT, expire=MAX_AGE)
+@cache_it_json(cache=cache_json)
 @transform
 def g_node(id):
     result = api.query("""
@@ -331,6 +358,55 @@ def nodes_in_buffer(nodes, buffer):
     return False
 
 
+# def filter_way(w_geom, b_geom, polygons):
+#     near_way_points = nearest_points(b_geom, w_geom)
+#     b_near_way = near_way_points[0]
+#     buff = b_near_way.buffer(b_near_way.distance(near_way_points[1]) + 0.00001, mitre_limit=1.0)
+#     buff = shapely.affinity.scale(buff, 1.0, 0.75)
+#
+#     n_intersect = buff.boundary.intersection(w_geom)
+#     n_intersect = [n_intersect] if isinstance(n_intersect, Point) else list(n_intersect)
+#     n_intersect = MultiPoint(n_intersect)
+#
+#     filtered = True
+#     if n_intersect:
+#         nearest = nearest_points(b_geom, n_intersect)
+#         mp = MultiPoint(list(n_intersect) + [nearest[0]])
+#         mp = Polygon(mp)
+#
+#         filtered = any(
+#             filter(lambda (bid, p): bid != b['id'] and p.boundary.intersects(mp.boundary),
+#                    polygons.items()))
+#
+#     return filtered
+
+
+def filter_building(way, b, polygons):
+    near_way_points = nearest_points(polygons[b['id']], way)
+    b_near_way = near_way_points[0]
+    buff = b_near_way.buffer(b_near_way.distance(near_way_points[1]) + 0.00001, mitre_limit=1.0)
+    buff = shapely.affinity.scale(buff, 1.0, 0.75)
+
+    n_intersect = buff.boundary.intersection(way)
+    n_intersect = [n_intersect] if isinstance(n_intersect, Point) else list(n_intersect)
+    n_intersect = MultiPoint(n_intersect)
+
+    filtered = True
+    if n_intersect:
+        nearest = nearest_points(polygons[b['id']], n_intersect)
+        mp = MultiPoint(list(n_intersect) + [nearest[0]])
+
+        try:
+            mp = Polygon(mp)
+            filtered = any(
+                filter(lambda (bid, p): bid != b['id'] and p.boundary.intersects(mp.boundary),
+                       polygons.items()))
+        except ValueError:
+            pass
+
+    return filtered
+
+
 @app.route('/way/<id>')
 @cache.cached(timeout=MAX_AGE, key_prefix=make_cache_key)
 def get_way(id):
@@ -353,8 +429,15 @@ def get_way(id):
     way = g_way(id)
     if not tags:
         if is_road(way):
+            way['type'] = 'way'
             all_w_buildings = query_way_buildings(id)
-            w_buildings = filter(lambda x: not buffer or Point(x['center_lon'], x['center_lat']).within(buffer), all_w_buildings)
+            w_buildings = filter(lambda x: not buffer or Point(x['center_lon'], x['center_lat']).within(buffer),
+                                 all_w_buildings)
+
+            shape = LineString(g_way_geom(id))
+
+            all_building_polygons = {b['id']: Polygon(g_way_geom(b['id'])) for b in w_buildings}
+            w_buildings = filter(lambda b: not filter_building(shape, b, all_building_polygons), w_buildings)
 
             way['buildings'] = map(lambda x: 'way/{}'.format(x['id']),
                                    w_buildings)
@@ -377,6 +460,7 @@ def get_way(id):
                     })
 
         elif is_building(way):
+            way['type'] = 'building'
             for node in query_building_elms(way):
                 p = Point(node['lon'], node['lat'])
                 if not buffer or p.within(buffer):
@@ -401,22 +485,27 @@ def get_way(id):
                     if not buffer or p.within(buffer):
                         surr.append('way/{}'.format(w['id']))
 
+            way['areas'] = map(lambda aid: 'area/{}'.format(aid),
+                               g_coord_area(way['center']['lat'], way['center']['lon']))
+
     del way['nd']
     response = jsonify(way)
     response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
+    response.headers['Last-Modified'] = format_date_time(time.mktime(datetime.now().timetuple()))
     return response
 
 
 @app.route('/way/<id>/geom')
 @cache.cached(timeout=MAX_AGE)
 def get_way_geom(id):
-    geom = g_way_geom(id)
-    points = map(lambda n: (float(n.lon), float(n.lat)), geom)
+    points = g_way_geom(id)
+    # points = map(lambda n: (float(n.lon), float(n.lat)), geom)
 
     way = g_way(id)
     shape = Polygon(points) if is_building(way) else LineString(points)
     response = jsonify({'wkt': dumps(shape)})
     response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
+    response.headers['Last-Modified'] = format_date_time(time.mktime(datetime.now().timetuple()))
     return response
 
 
@@ -435,12 +524,20 @@ def get_node(id):
     tags = request.args.get('tags')
     tags = tags is not None
 
+    n_key = _elm_key(node, MATCH_TAGS)
+    node['type'] = n_key
+
     if not tags:
         n_building = query_node_building(node)
         if n_building:
             node['building'] = 'way/{}'.format(n_building['id'])
+
+        node['areas'] = map(lambda aid: 'area/{}'.format(aid),
+                            g_coord_area(node['lat'], node['lon']))
+
     response = jsonify(node)
     response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
+    response.headers['Last-Modified'] = format_date_time(time.mktime(datetime.now().timetuple()))
     return response
 
 
@@ -451,6 +548,7 @@ def get_node_geom(id):
     point = Point(node['lon'], node['lat'])
     response = jsonify({'wkt': dumps(point)})
     response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
+    response.headers['Last-Modified'] = format_date_time(time.mktime(datetime.now().timetuple()))
     return response
 
 
@@ -460,17 +558,35 @@ def get_area(id):
     result = api.query("""area({}); out meta;""".format(id))
     area = result.areas.pop()
 
-    response = jsonify(area.tags)
+    admin_level = int(area.tags.get('admin_level', -1))
+    spec_type = None
+    if admin_level == 4:
+        spec_type = 'province'
+    elif admin_level == 8:
+        spec_type = 'municipality'
+    elif admin_level == 2:
+        spec_type = 'country'
+    type = 'area'
+
+    if spec_type:
+        type = ':'.join([type, spec_type])
+
+    element = {'type': type,
+               'id': id,
+               'tags': area.tags}
+    response = jsonify(element)
     response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
+    response.headers['Last-Modified'] = format_date_time(time.mktime(datetime.now().timetuple()))
     return response
 
 
 def _elm_key(elm, match=set()):
     key = None
-    matching_tags = list(set(match).intersection(set(elm['tags'].keys())))
+    tags = elm.get('tags', elm.get('tag'))
+    matching_tags = list(set(match).intersection(set(tags.keys())))
     try:
         tag = matching_tags.pop()
-        key = '{}:{}'.format(tag, elm['tags'][tag])
+        key = '{}:{}'.format(tag, tags[tag])
     except IndexError:
         pass
 
@@ -567,6 +683,7 @@ def get_geo_elements():
 
     response = jsonify(result)
     response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
+    response.headers['Last-Modified'] = format_date_time(time.mktime(datetime.now().timetuple()))
     return response
 
 

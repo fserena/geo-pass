@@ -8,4 +8,6 @@ shapely
 requests
 redis
 redis-simple-cache
+python-dateutil
+py2neo
 

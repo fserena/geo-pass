@@ -31,6 +31,7 @@ __author__ = 'Fernando Serena'
 
 API_PORT = int(os.environ.get('API_PORT', 5006))
 
+
 def number_of_workers():
     return (multiprocessing.cpu_count() * 2) + 1
 
@@ -69,4 +70,3 @@ if __name__ == '__main__':
         StandaloneApplication(options).run()
     except (KeyboardInterrupt, SystemExit, SystemError):
         pass
-
