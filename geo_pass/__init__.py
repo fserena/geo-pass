@@ -32,7 +32,7 @@ if google_api_key is None:
 
 def geocoding(address):
     response = requests.get(
-        u'https://maps.googleapis.com/maps/api/geocode/json?address={}&key='.format(
+        u'https://maps.googleapis.com/maps/api/geocode/json?address={}&key={}'.format(
             address, google_api_key))
 
     if response.status_code == 200:

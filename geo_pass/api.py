@@ -61,7 +61,7 @@ cache = Cache(app, config={
 # })
 
 cache_json = SimpleCache(hashkeys=True, host=CACHE_REDIS_HOST, port=CACHE_REDIS_PORT,
-                         db=1, namespace='cjson', limit=100000)
+                         db=1, namespace='chjson', limit=100000)
 
 api = overpy.Overpass(url=os.environ.get('OVERPASS_API_URL', 'http://127.0.0.1:5001/api/interpreter'))
 

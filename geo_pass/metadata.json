@@ -1,7 +1,7 @@
 {
-  "version": "0.2.11",
+  "version": "0.2.12",
   "author": "Fernando Serena",
-  "email": "fserena@fi.upm.es",
+  "email": "kudhmud@gmail.com",
   "github": "https://github.com/fserena/geo-pass",
   "description": "A REST API for geographic elements through Overpass and OpenStreetMap"
 }
