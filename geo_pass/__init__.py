@@ -26,8 +26,6 @@ import requests
 __author__ = 'Fernando Serena'
 
 google_api_key = os.environ.get('GOOGLE_API_KEY', None)
-if google_api_key is None:
-    sys.exit(-1)
 
 
 def geocoding(address):

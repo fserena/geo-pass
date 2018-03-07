@@ -599,13 +599,19 @@ MATCH_TAGS = {'shop', 'highway', 'amenity', 'building', 'tourism'}
 @app.route('/elements')
 @cache.cached(timeout=MAX_AGE, key_prefix=make_cache_key)
 def get_geo_elements():
-    location = request.args.get('location')
-    if location:
+    try:
+        location = request.args.get('location')
         ll = geocoding(location)
         lat, lng = ll['lat'], ll['lng']
-    else:
-        lat = float(request.args.get('lat'))
-        lng = float(request.args.get('lng'))
+    except Exception:
+        try:
+            lat = float(request.args.get('lat'))
+            lng = float(request.args.get('lng'))
+        except TypeError:
+            response = jsonify({'message': 'Bad arguments'})
+            response.status_code = 400
+            return response
+
     radius = int(request.args.get('radius', 200))
     limit = request.args.get('limit', None)
     if limit:
