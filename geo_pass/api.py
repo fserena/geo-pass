@@ -334,7 +334,7 @@ def g_way_geom(id):
 def g_node(id):
     result = api.query("""
             node({});            
-            out meta;
+            out;
         """.format(id))
     return list(result.nodes)
 
@@ -555,7 +555,7 @@ def get_node_geom(id):
 @app.route('/area/<id>')
 @cache.cached(timeout=MAX_AGE, key_prefix=make_cache_key)
 def get_area(id):
-    result = api.query("""area({}); out meta;""".format(id))
+    result = api.query("""area({}); out;""".format(id))
     area = result.areas.pop()
 
     admin_level = int(area.tags.get('admin_level', -1))
