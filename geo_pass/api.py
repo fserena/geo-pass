@@ -19,23 +19,24 @@
 #-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=#
 """
 import calendar
-import time
-from wsgiref.handlers import format_date_time
 import os
 import sys
+import time
 from datetime import datetime
 from functools import wraps
+from wsgiref.handlers import format_date_time
 
 import overpy
 import shapely
 from LatLon import LatLon
 from flask import Flask, request, jsonify
+from flask_caching import Cache
 from overpy.exception import DataIncomplete
-from flask_cache import Cache
-from shapely.geometry import Point, Polygon, LineString, LinearRing, MultiPoint
+from redis_cache import cache_it_json, SimpleCache
+from shapely.geometry import Point, Polygon, LineString, MultiPoint
 from shapely.ops import nearest_points
 from shapely.wkt import dumps
-from redis_cache import cache_it_json, SimpleCache
+
 from geo_pass import geocoding
 
 __author__ = 'Fernando Serena'
@@ -330,6 +331,18 @@ def g_way_geom(id):
 
 
 @cache_it_json(cache=cache_json)
+def g_area_geom(id):
+    geom = api.query("""
+                area({});
+                way(pivot);
+                out body;
+                >;
+                out skel qt;
+            """.format(id))
+    return map(lambda n: (float(n.lon), float(n.lat)), list(geom.ways).pop().nodes)
+
+
+@cache_it_json(cache=cache_json)
 @transform
 def g_node(id):
     result = api.query("""
@@ -356,29 +369,6 @@ def nodes_in_buffer(nodes, buffer):
         if p.within(buffer):
             return True
     return False
-
-
-# def filter_way(w_geom, b_geom, polygons):
-#     near_way_points = nearest_points(b_geom, w_geom)
-#     b_near_way = near_way_points[0]
-#     buff = b_near_way.buffer(b_near_way.distance(near_way_points[1]) + 0.00001, mitre_limit=1.0)
-#     buff = shapely.affinity.scale(buff, 1.0, 0.75)
-#
-#     n_intersect = buff.boundary.intersection(w_geom)
-#     n_intersect = [n_intersect] if isinstance(n_intersect, Point) else list(n_intersect)
-#     n_intersect = MultiPoint(n_intersect)
-#
-#     filtered = True
-#     if n_intersect:
-#         nearest = nearest_points(b_geom, n_intersect)
-#         mp = MultiPoint(list(n_intersect) + [nearest[0]])
-#         mp = Polygon(mp)
-#
-#         filtered = any(
-#             filter(lambda (bid, p): bid != b['id'] and p.boundary.intersects(mp.boundary),
-#                    polygons.items()))
-#
-#     return filtered
 
 
 def filter_building(way, b, polygons):
@@ -413,11 +403,15 @@ def get_way(id):
     lat = request.args.get('lat')
     lng = request.args.get('lng')
     radius = request.args.get('radius')
+    area = request.args.get('area')
     tags = request.args.get('tags')
     tags = tags is not None
     buffer = None
 
-    if any([lat, lng, radius]):
+    if area:
+        area_points = g_area_geom(int(area))
+        buffer = Polygon(area_points)
+    elif any([lat, lng, radius]):
         lat = float(lat)
         lng = float(lng)
         radius = float(radius)
@@ -575,6 +569,17 @@ def get_area(id):
                'id': id,
                'tags': area.tags}
     response = jsonify(element)
+    response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
+    response.headers['Last-Modified'] = format_date_time(time.mktime(datetime.now().timetuple()))
+    return response
+
+
+@app.route('/area/<id>/geom')
+@cache.cached(timeout=MAX_AGE)
+def get_area_geom(id):
+    points = g_area_geom(id)
+    shape = Polygon(points)
+    response = jsonify({'wkt': dumps(shape)})
     response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
     response.headers['Last-Modified'] = format_date_time(time.mktime(datetime.now().timetuple()))
     return response
