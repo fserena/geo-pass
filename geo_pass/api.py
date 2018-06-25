@@ -19,11 +19,14 @@
 #-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=#
 """
 import calendar
+import json
 import os
 import sys
 import time
 from datetime import datetime
+from decimal import Decimal
 from functools import wraps
+from urllib2 import urlopen, HTTPError
 from wsgiref.handlers import format_date_time
 
 import overpy
@@ -31,13 +34,15 @@ import shapely
 from LatLon import LatLon
 from flask import Flask, request, jsonify
 from flask_caching import Cache
+from overpy import exception
 from overpy.exception import DataIncomplete
 from redis_cache import cache_it_json, SimpleCache
-from shapely.geometry import Point, Polygon, LineString, MultiPoint
+from shapely.geometry import Point, Polygon, LineString, MultiPoint, MultiPolygon
 from shapely.ops import nearest_points
 from shapely.wkt import dumps
 
 from geo_pass import geocoding
+from geo_pass.poly import ways2poly
 
 __author__ = 'Fernando Serena'
 
@@ -56,15 +61,116 @@ cache = Cache(app, config={
     'CACHE_REDIS_PORT': CACHE_REDIS_PORT
 })
 
+
 # cache = Cache(app, config={
 #     'CACHE_TYPE': 'filesystem',
 #     'CACHE_DIR': 'cache'
 # })
 
-cache_json = SimpleCache(hashkeys=True, host=CACHE_REDIS_HOST, port=CACHE_REDIS_PORT,
-                         db=1, namespace='chjson', limit=100000)
 
-api = overpy.Overpass(url=os.environ.get('OVERPASS_API_URL', 'http://127.0.0.1:5001/api/interpreter'))
+class Overpass(overpy.Overpass):
+    def __init__(self, url=None, cache=None):
+        super(Overpass, self).__init__(url=url)
+        self.cache = cache
+
+    def parse_json(self, data, encoding="utf-8"):
+        """
+        Parse raw response from Overpass service.
+
+        :param data: Raw JSON Data
+        :type data: String or Bytes
+        :param encoding: Encoding to decode byte string
+        :type encoding: String
+        :return: Result object
+        :rtype: overpy.Result
+        """
+
+        try:
+            members = data.get('elements', [{}])[0].get('members', [])
+        except IndexError:
+            members = None
+        if members:
+            members = filter(lambda m: m.get('geometry', True), members)
+            data['elements'][0]['members'] = members
+            for m in members:
+                if 'geometry' in m:
+                    geometry = filter(lambda p: p, m['geometry'])
+                    m['geometry'] = geometry
+
+        return overpy.Result.from_json(data, api=self)
+
+    def __request(self, query):
+        try:
+            f = urlopen(self.url, query)
+        except HTTPError as e:
+            f = e
+
+        response = f.read(self.read_chunk_size)
+        while True:
+            data = f.read(self.read_chunk_size)
+            if len(data) == 0:
+                break
+            response = response + data
+        f.close()
+
+        if f.code == 200:
+            if overpy.PY2:
+                http_info = f.info()
+                content_type = http_info.getheader("content-type")
+            else:
+                content_type = f.getheader("Content-Type")
+
+            if content_type == "application/json":
+                if isinstance(response, bytes):
+                    response = response.decode("utf-8")
+                response = json.loads(response)
+                return response
+
+            raise exception.OverpassUnknownContentType(content_type)
+
+        if f.code == 400:
+            msgs = []
+            for msg in self._regex_extract_error_msg.finditer(response):
+                tmp = self._regex_remove_tag.sub(b"", msg.group("msg"))
+                try:
+                    tmp = tmp.decode("utf-8")
+                except UnicodeDecodeError:
+                    tmp = repr(tmp)
+                msgs.append(tmp)
+
+            raise exception.OverpassBadRequest(
+                query,
+                msgs=msgs
+            )
+
+        if f.code == 429:
+            raise exception.OverpassTooManyRequests
+
+        if f.code == 504:
+            raise exception.OverpassGatewayTimeout
+
+        raise exception.OverpassUnknownHTTPStatusCode(f.code)
+
+    def query(self, query):
+        print u'querying: {}'.format(query)
+        query = '[out:json];\n' + query
+
+        if not isinstance(query, bytes):
+            query = query.encode("utf-8")
+
+        response = cache_it_json(cache=self.cache)(self.__request)(query)
+        response_str = json.dumps(response)
+        try:
+            return self.parse_json(json.loads(response_str, parse_float=Decimal))
+        except AttributeError:
+            return None
+
+
+cache_json = SimpleCache(hashkeys=True, host=CACHE_REDIS_HOST, port=CACHE_REDIS_PORT,
+                         db=CACHE_REDIS_DB, namespace='ops', limit=100000, expire=MAX_AGE)
+
+api = Overpass(url=os.environ.get('OVERPASS_API_URL', 'http://127.0.0.1:5001/api/interpreter'),
+               cache=cache_json)
 
 
 def make_cache_key(*args, **kwargs):
@@ -200,7 +306,7 @@ def query_surrounding_buildings(id):
         <;        
         out center;""".format(id))
     return map(lambda x: {'id': x.id, 'center_lat': float(x.center_lat), 'center_lon': float(x.center_lon)},
-               filter(lambda w: w.id != int(id), result.ways))
+               filter(lambda w: w.id != int(id) and 'building' in w.tags, result.ways))
 
 
 @cache_it_json(cache=cache_json)
@@ -330,16 +436,79 @@ def g_way_geom(id):
     return map(lambda n: (float(n.lon), float(n.lat)), list(geom.ways).pop().nodes)
 
 
+def relation_multipolygon(rels):
+    rel_members = [[m for m in r.members if m.geometry and m.role == 'outer'] for r in rels]
+    all_members = reduce(lambda x, y: x + y, rel_members, [])
+    poly, incomplete = ways2poly(all_members)
+
+    geoms = []
+    for p in poly:
+        geoms.append(Polygon([(n.lon, n.lat) for n in p]))  # .simplify(0.000001))
+    for l in incomplete:
+        geoms.append(Polygon(LineString([(n.lon, n.lat) for n in l])))  # .simplify(0.000001))
+
+    return MultiPolygon(geoms)
+
+
 @cache_it_json(cache=cache_json)
 def g_area_geom(id):
-    geom = api.query("""
+    def transform_tag_value(k, v):
+        if k == 'admin_level':
+            return int(v)
+        return u'"{}"'.format(v)
+
+    result = api.query("""
                 area({});
-                way(pivot);
-                out body;
-                >;
-                out skel qt;
+                out;
             """.format(id))
-    return map(lambda n: (float(n.lon), float(n.lat)), list(geom.ways).pop().nodes)
+
+    area_tags = result.areas[0].tags
+    area_tags = {key: transform_tag_value(key, v) for key, v in area_tags.items() if
+                 key in ['type', 'name:en', 'name', 'admin_level', 'boundary']}
+
+    if 'name' not in area_tags:
+        return []
+
+    tag_filters = u''.join(
+        [u'["{}"={}]'.format(key, value) for key, value in area_tags.items()])
+
+    geom = api.query(u"""            
+            rel{};            
+            out geom;
+    """.format(tag_filters))
+
+    if geom is None:
+        return []
+
+    if geom.relations:
+        area_poly = relation_multipolygon(geom.relations)
+        # n_nodes = reduce(lambda x, y: x + len(y.exterior.coords), area_poly, 0)
+        # simpl_linear_factor = 0.0000006711
+        # simpl_factor = simpl_linear_factor * n_nodes
+        # if simpl_factor > 0.01:
+        #     simpl_factor = 0.01
+        # area_poly = area_poly.simplify(simpl_factor)
+    else:
+        geom = api.query(u"""
+                    way{};            
+                    out body;
+                    >;
+                    out skel qt;
+            """.format(tag_filters))
+        all_points = list(geom.ways).pop().nodes
+        # if all_points:
+        area_poly = Polygon(map(lambda n: (float(n.lon), float(n.lat)), all_points))
+
+    if isinstance(area_poly, Polygon):
+        area_poly = MultiPolygon([area_poly])
+
+    return [map(lambda x: tuple(x[0]), zip(p.exterior.coords)) for p in area_poly]
+
+
+def get_area_multipolygon(id):
+    area_geoms = g_area_geom(int(id))
+    area_polys = [Polygon(points) for points in area_geoms]
+    return MultiPolygon(area_polys)
 
 
 @cache_it_json(cache=cache_json)
@@ -409,8 +578,7 @@ def get_way(id):
     buffer = None
 
     if area:
-        area_points = g_area_geom(int(area))
-        buffer = Polygon(area_points)
+        buffer = get_area_multipolygon(area)
     elif any([lat, lng, radius]):
         lat = float(lat)
         lng = float(lng)
@@ -546,6 +714,78 @@ def get_node_geom(id):
     return response
 
 
+def search_sub_admin_areas(sub_admin_level, bounds):
+    bounds_str = '{}, {}, {}, {}'.format(bounds[1],
+                                         bounds[0],
+                                         bounds[3],
+                                         bounds[2])
+
+    found_sub_areas = False
+    sub_areas_result = None
+    while not found_sub_areas and sub_admin_level < 11:
+        sub_admin_level += 1
+        if sub_admin_level == 5:
+            sub_admin_level += 1  # skip religious admins (level 5)
+
+        sub_areas_result = api.query("""
+            (
+              rel[boundary][type][admin_level={}][name]({});
+              way[boundary][type][admin_level={}][name]({});
+            );
+            out tags;
+            out center;
+        """.format(sub_admin_level, bounds_str, sub_admin_level, bounds_str))
+        found_sub_areas = sub_areas_result.ways or sub_areas_result.relations
+
+    return sub_areas_result, sub_admin_level
+
+
+@cache_it_json(cache=cache_json)
+def query_sub_areas(id, admin_level):
+    contained_areas = set()
+    if admin_level >= 0:
+        geoms = get_area_multipolygon(id)
+        sub_relation_ids = set()
+        sub_way_ids = set()
+        sub_admin_level = admin_level
+
+        area_bounds = geoms.bounds
+        while not contained_areas and sub_admin_level < 11:
+            sub_areas_result, sub_admin_level = search_sub_admin_areas(sub_admin_level, area_bounds)
+            sub_area_ids = set()
+            for rel in sub_areas_result.relations:
+                if rel.id not in sub_relation_ids:
+                    sub_relation_ids.add(rel.id)
+                else:
+                    continue
+                sub_area_res = api.query(u"""
+                    area[boundary][type][admin_level={}][name="{}"];
+                    out ids;
+                """.format(sub_admin_level, rel.tags['name']))
+                for sub_rel_area in sub_area_res.areas:
+                    sub_area_ids.add(sub_rel_area.id)
+
+            for way in sub_areas_result.ways:
+                if way.id not in sub_way_ids:
+                    sub_way_ids.add(way.id)
+                else:
+                    continue
+                sub_area_res = api.query(u"""
+                    area[boundary][type][admin_level={}][name="{}"];
+                    out ids;
+                """.format(sub_admin_level, way.tags['name']))
+                for sub_way_area in sub_area_res.areas:
+                    sub_area_ids.add(sub_way_area.id)
+
+            sub_area_ids = filter(lambda a: a not in contained_areas, sub_area_ids)
+            for sub_area_id in sub_area_ids:
+                sub_area_multipoly = get_area_multipolygon(sub_area_id)
+                for sub_area_poly in sub_area_multipoly:
+                    if sub_area_poly.within(geoms):
+                        contained_areas.add(sub_area_id)
+    return list(contained_areas)
+
+
 @app.route('/area/<id>')
 @cache.cached(timeout=MAX_AGE, key_prefix=make_cache_key)
 def get_area(id):
@@ -565,9 +805,12 @@ def get_area(id):
     if spec_type:
         type = ':'.join([type, spec_type])
 
+    contained_areas = query_sub_areas(id, admin_level)
+
     element = {'type': type,
                'id': id,
-               'tags': area.tags}
+               'tags': area.tags,
+               'contains': list(map(lambda a: 'area/{}'.format(a), contained_areas))}
     response = jsonify(element)
     response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
     response.headers['Last-Modified'] = format_date_time(time.mktime(datetime.now().timetuple()))
@@ -577,9 +820,14 @@ def get_area(id):
 @app.route('/area/<id>/geom')
 @cache.cached(timeout=MAX_AGE)
 def get_area_geom(id):
-    points = g_area_geom(id)
-    shape = Polygon(points)
-    response = jsonify({'wkt': dumps(shape)})
+    multipolygon = get_area_multipolygon(id)
+    n_nodes = reduce(lambda x, y: x + len(y.exterior.coords), multipolygon, 0)
+    simpl_linear_factor = 0.0000006711
+    simpl_factor = simpl_linear_factor * n_nodes
+    if simpl_factor > 0.01:
+        simpl_factor = 0.01
+    multipolygon = multipolygon.simplify(simpl_factor)
+    response = jsonify({'wkt': dumps(multipolygon)})
     response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
     response.headers['Last-Modified'] = format_date_time(time.mktime(datetime.now().timetuple()))
     return response
@@ -604,29 +852,45 @@ MATCH_TAGS = {'shop', 'highway', 'amenity', 'building', 'tourism'}
 @app.route('/elements')
 @cache.cached(timeout=MAX_AGE, key_prefix=make_cache_key)
 def get_geo_elements():
-    try:
-        location = request.args.get('location')
-        ll = geocoding(location)
-        lat, lng = ll['lat'], ll['lng']
-    except Exception:
-        try:
-            lat = float(request.args.get('lat'))
-            lng = float(request.args.get('lng'))
-        except TypeError:
-            response = jsonify({'message': 'Bad arguments'})
-            response.status_code = 400
-            return response
-
-    radius = int(request.args.get('radius', 200))
     limit = request.args.get('limit', None)
     if limit:
         limit = int(limit)
 
-    poi = LatLon(lat, lng)
+    area = request.args.get('area')
+    area_geoms = None
+    if area:
+        area_geoms = g_area_geom(area) if area else None
+        mp = get_area_multipolygon(area)
+        print mp.area
+    else:
+        try:
+            location = request.args.get('location')
+            ll = geocoding(location)
+            lat, lng = ll['lat'], ll['lng']
+        except Exception:
+            try:
+                lat = float(request.args.get('lat'))
+                lng = float(request.args.get('lng'))
+            except TypeError:
+                response = jsonify({'message': 'Bad arguments'})
+                response.status_code = 400
+                return response
+
+    if area_geoms:
+        for points in area_geoms:
+            lat, lng = points[0][1], points[0][0]
+            lat_lng_points = ['{} {}'.format(p[1], p[0]) for p in points]
+            geo_filter = 'poly:"{}"'.format(' '.join(lat_lng_points))
+            center_tuple = list(Polygon(points).representative_point().coords)[0]
+            center = LatLon(*reversed(center_tuple))
+    else:
+        radius = int(request.args.get('radius', 200))
+        center = LatLon(lat, lng)
+        geo_filter = 'around:{},{},{}'.format(radius, lat, lng)
 
     osm_result = api.query("""
-        node(around:{},{},{}) -> .na;
-        way(around:{},{},{}) -> .wa;
+        node({}) -> .na;
+        way({}) -> .wa;
         (
             way.wa[highway];
             way.wa[footway];
@@ -637,12 +901,12 @@ def get_geo_elements():
             node.na[tourism];
         );        
         out geom;
-        """.format(radius, lat, lng, radius, lat, lng))
+        """.format(geo_filter, geo_filter))
 
     elms = []
 
     for i, node in enumerate(osm_result.nodes):
-        elm = {'id': 'node/{}'.format(node.id), 'distance': node_distance(node, poi)}
+        elm = {'id': 'node/{}'.format(node.id)}  # node_distance(node, poi)}
         key = _elm_key({'tags': node.tags}, MATCH_TAGS)
         if key is None:
             key = 'node'
@@ -655,7 +919,7 @@ def get_geo_elements():
             break
 
     for i, way in enumerate(osm_result.ways):
-        elm = {'id': 'way/{}'.format(way.id), 'distance': way_distance(osm_result, way, poi)}
+        elm = {'id': 'way/{}'.format(way.id)}  # way_distance(osm_result, way, poi)}
         key = _elm_key({'tags': way.tags}, MATCH_TAGS)
         if key is None:
             key = 'way'
@@ -686,8 +950,8 @@ def get_geo_elements():
 
     result = {
         'center': {
-            'lat': float(poi.lat),
-            'lng': float(poi.lon)
+            'lat': float(center.lat),
+            'lng': float(center.lon)
         },
         'results': elms
     }
