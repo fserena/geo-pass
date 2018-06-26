@@ -152,11 +152,11 @@ class Overpass(overpy.Overpass):
         raise exception.OverpassUnknownHTTPStatusCode(f.code)
 
     def query(self, query):
-        print u'querying: {}'.format(query)
-        query = '[out:json];\n' + query
-
         if not isinstance(query, bytes):
             query = query.encode("utf-8")
+
+        print "querying:", query
+        query = "[out:json];\n" + query
 
         response = cache_it_json(cache=self.cache)(self.__request)(query)
         response_str = json.dumps(response)
