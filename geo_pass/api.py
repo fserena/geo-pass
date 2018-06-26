@@ -169,7 +169,7 @@ class Overpass(overpy.Overpass):
 cache_json = SimpleCache(hashkeys=True, host=CACHE_REDIS_HOST, port=CACHE_REDIS_PORT,
                          db=CACHE_REDIS_DB, namespace='ops', limit=100000, expire=MAX_AGE)
 
-api = Overpass(url=os.environ.get('OVERPASS_API_URL', 'http://127.0.0.1:5001/api/interpreter'),
+api = Overpass(url=os.environ.get('OVERPASS_API_URL', 'http://127.0.0.1:5000/api/interpreter'),
                cache=cache_json)
 
 
@@ -482,12 +482,6 @@ def g_area_geom(id):
 
     if geom.relations:
         area_poly = relation_multipolygon(geom.relations)
-        # n_nodes = reduce(lambda x, y: x + len(y.exterior.coords), area_poly, 0)
-        # simpl_linear_factor = 0.0000006711
-        # simpl_factor = simpl_linear_factor * n_nodes
-        # if simpl_factor > 0.01:
-        #     simpl_factor = 0.01
-        # area_poly = area_poly.simplify(simpl_factor)
     else:
         geom = api.query(u"""
                     way{};            
@@ -496,7 +490,6 @@ def g_area_geom(id):
                     out skel qt;
             """.format(tag_filters))
         all_points = list(geom.ways).pop().nodes
-        # if all_points:
         area_poly = Polygon(map(lambda n: (float(n.lon), float(n.lat)), all_points))
 
     if isinstance(area_poly, Polygon):
@@ -661,8 +654,6 @@ def get_way(id):
 @cache.cached(timeout=MAX_AGE)
 def get_way_geom(id):
     points = g_way_geom(id)
-    # points = map(lambda n: (float(n.lon), float(n.lat)), geom)
-
     way = g_way(id)
     shape = Polygon(points) if is_building(way) else LineString(points)
     response = jsonify({'wkt': dumps(shape)})
@@ -714,30 +705,39 @@ def get_node_geom(id):
     return response
 
 
-def search_sub_admin_areas(sub_admin_level, bounds):
-    bounds_str = '{}, {}, {}, {}'.format(bounds[1],
-                                         bounds[0],
-                                         bounds[3],
-                                         bounds[2])
+def search_sub_admin_areas(sub_admin_level, geoms):
+    cur_admin_level = sub_admin_level
 
-    found_sub_areas = False
-    sub_areas_result = None
-    while not found_sub_areas and sub_admin_level < 11:
-        sub_admin_level += 1
-        if sub_admin_level == 5:
-            sub_admin_level += 1  # skip religious admins (level 5)
+    all_sub_areas_result = {}
 
-        sub_areas_result = api.query("""
-            (
-              rel[boundary][type][admin_level={}][name]({});
-              way[boundary][type][admin_level={}][name]({});
-            );
-            out tags;
-            out center;
-        """.format(sub_admin_level, bounds_str, sub_admin_level, bounds_str))
-        found_sub_areas = sub_areas_result.ways or sub_areas_result.relations
+    while not all_sub_areas_result and cur_admin_level < 11:
+        cur_admin_level += 1
+        if cur_admin_level == 5:
+            cur_admin_level += 1  # skip religious admins (level 5)
 
-    return sub_areas_result, sub_admin_level
+        for geom in geoms:
+            geom_points = map(lambda x: tuple(x[0]), zip(geom.convex_hull.exterior.coords))
+            lat_lng_points = ['{} {}'.format(p[1], p[0]) for p in geom_points]
+            poly_str = 'poly:"{}"'.format(' '.join(lat_lng_points))
+
+            sub_areas_result = api.query("""
+                (
+                  rel[boundary][type][admin_level={}][name]({});
+                  way[boundary][type][admin_level={}][name]({});
+                );
+                out tags;
+                out center;
+            """.format(cur_admin_level, poly_str, cur_admin_level, poly_str))
+            for r in sub_areas_result.relations:
+                r_id = 'r{}'.format(r.id)
+                if r_id.format(r.id) not in all_sub_areas_result:
+                    all_sub_areas_result[r_id] = r
+            for w in sub_areas_result.ways:
+                w_id = 'w{}'.format(w.id)
+                if w_id.format(w.id) not in all_sub_areas_result:
+                    all_sub_areas_result[w_id] = w
+
+    return all_sub_areas_result.values(), cur_admin_level
 
 
 @cache_it_json(cache=cache_json)
@@ -745,43 +745,29 @@ def query_sub_areas(id, admin_level):
     contained_areas = set()
     if admin_level >= 0:
         geoms = get_area_multipolygon(id)
-        sub_relation_ids = set()
-        sub_way_ids = set()
+        sub_admins_ids = set()
         sub_admin_level = admin_level
 
-        area_bounds = geoms.bounds
         while not contained_areas and sub_admin_level < 11:
-            sub_areas_result, sub_admin_level = search_sub_admin_areas(sub_admin_level, area_bounds)
+            sub_admins, sub_admin_level = search_sub_admin_areas(sub_admin_level, geoms)
             sub_area_ids = set()
-            for rel in sub_areas_result.relations:
-                if rel.id not in sub_relation_ids:
-                    sub_relation_ids.add(rel.id)
+            for a in sub_admins:
+                if a.id not in sub_admins_ids:
+                    sub_admins_ids.add(a.id)
                 else:
                     continue
                 sub_area_res = api.query(u"""
                     area[boundary][type][admin_level={}][name="{}"];
                     out ids;
-                """.format(sub_admin_level, rel.tags['name']))
+                """.format(sub_admin_level, a.tags['name']))
                 for sub_rel_area in sub_area_res.areas:
                     sub_area_ids.add(sub_rel_area.id)
-
-            for way in sub_areas_result.ways:
-                if way.id not in sub_way_ids:
-                    sub_way_ids.add(way.id)
-                else:
-                    continue
-                sub_area_res = api.query(u"""
-                    area[boundary][type][admin_level={}][name="{}"];
-                    out ids;
-                """.format(sub_admin_level, way.tags['name']))
-                for sub_way_area in sub_area_res.areas:
-                    sub_area_ids.add(sub_way_area.id)
 
             sub_area_ids = filter(lambda a: a not in contained_areas, sub_area_ids)
             for sub_area_id in sub_area_ids:
                 sub_area_multipoly = get_area_multipolygon(sub_area_id)
                 for sub_area_poly in sub_area_multipoly:
-                    if sub_area_poly.within(geoms):
+                    if sub_area_poly.area <= geoms.area and sub_area_poly.within(geoms):
                         contained_areas.add(sub_area_id)
     return list(contained_areas)
 
