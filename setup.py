@@ -40,7 +40,7 @@ setup(
     download_url="https://github.com/fserena/geo-pass/tarball/{}".format(metadata['version']),
     packages=find_packages(exclude=['ez_setup', 'examples', 'tests']),
     install_requires=['overpy', 'Flask', 'Flask-Caching', 'LatLon', 'gunicorn', 'futures', 'shapely', 'requests', 'redis',
-                      'redis-simple-cache'],
+                      'redis-simple-cache', 'fuzzywuzzy', 'python-Levenshtein'],
     classifiers=[],
     package_dir={'geo_pass': 'geo_pass'},
     package_data={'geo_pass': ['metadata.json']},

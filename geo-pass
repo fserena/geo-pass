@@ -20,11 +20,12 @@
 #-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=#
 """
 
-import os
 import multiprocessing
+import os
 
 import gunicorn.app.base
 from gunicorn.six import iteritems
+
 from geo_pass.api import app
 
 __author__ = 'Fernando Serena'

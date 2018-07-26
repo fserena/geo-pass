@@ -9,4 +9,5 @@ requests
 redis
 redis-simple-cache
 python-dateutil
-
+fuzzywuzzy
+python-Levenshtein
