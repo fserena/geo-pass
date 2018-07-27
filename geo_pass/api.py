@@ -38,6 +38,7 @@ from fuzzywuzzy import process
 from overpy import exception
 from overpy.exception import DataIncomplete
 from redis_cache import cache_it_json, SimpleCache
+from shapely.errors import TopologicalError
 from shapely.geometry import Point, Polygon, LineString, MultiPoint, MultiPolygon
 from shapely.ops import nearest_points
 from shapely.wkt import dumps
@@ -777,7 +778,8 @@ def query_sub_areas(id, admin_level):
     if admin_level >= 0:
         geoms = get_area_multipolygon(id)
         diff_geoms = get_area_multipolygon(id)
-        simpl_geoms = geoms.simplify(0.01)
+        area_factor = simplify_factor(geoms, max=0.1)
+        simpl_geoms = geoms.simplify(area_factor)
         sub_admins_ids = set()
         sub_admin_level = admin_level
 
@@ -805,20 +807,22 @@ def query_sub_areas(id, admin_level):
             sub_area_ids = filter(lambda a: a not in contained_areas, sub_area_ids)
             for sub_area_id in sub_area_ids:
                 sub_area_multipoly = get_area_multipolygon(sub_area_id)
-                intersection = sub_area_multipoly.simplify(0.01).intersection(simpl_geoms)
-                if isinstance(intersection, Polygon) or isinstance(intersection, MultiPolygon):
-                    if intersection.area < sub_area_multipoly.area * 0.1:
-                        print sub_area_id
-                    else:
-                        contained_areas.add(sub_area_id)
-                        try:
-                            diff_geoms = diff_geoms.difference(sub_area_multipoly)
-                        except Exception:
-                            for sub_area_poly in sub_area_multipoly:
-                                try:
-                                    diff_geoms = diff_geoms.difference(sub_area_poly)
-                                except Exception as e:
-                                    print e.message
+                sub_area_factor = simplify_factor(sub_area_multipoly, max=0.1)
+                try:
+                    intersection = sub_area_multipoly.simplify(sub_area_factor).intersection(simpl_geoms)
+                    if isinstance(intersection, Polygon) or isinstance(intersection, MultiPolygon):
+                        if intersection.area >= sub_area_multipoly.area * 0.1:
+                            contained_areas.add(sub_area_id)
+                            try:
+                                diff_geoms = diff_geoms.difference(sub_area_multipoly)
+                            except Exception:
+                                for sub_area_poly in sub_area_multipoly:
+                                    try:
+                                        diff_geoms = diff_geoms.difference(sub_area_poly)
+                                    except Exception as e:
+                                        print e.message
+                except TopologicalError:
+                    pass
 
     if len(contained_areas) >= 2:
         pass
@@ -864,15 +868,20 @@ def get_area(id):
     return response
 
 
+def simplify_factor(multipolygon, max=0.01):
+    n_nodes = reduce(lambda x, y: x + len(y.exterior.coords), multipolygon, 0)
+    simpl_linear_factor = 0.0000013
+    simpl_factor = simpl_linear_factor * n_nodes
+    if simpl_factor > max:
+        simpl_factor = max
+    return simpl_factor
+
+
 @app.route('/area/<id>/geom')
 @cache.cached(timeout=MAX_AGE)
 def get_area_geom(id):
     multipolygon = get_area_multipolygon(id)
-    n_nodes = reduce(lambda x, y: x + len(y.exterior.coords), multipolygon, 0)
-    simpl_linear_factor = 0.0000006711
-    simpl_factor = simpl_linear_factor * n_nodes
-    if simpl_factor > 0.01:
-        simpl_factor = 0.01
+    simpl_factor = simplify_factor(multipolygon)
     multipolygon = multipolygon.simplify(simpl_factor)
     response = jsonify({'wkt': dumps(multipolygon)})
     response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
