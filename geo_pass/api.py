@@ -21,12 +21,13 @@
 import calendar
 import json
 import os
+import ssl
 import sys
 import time
 from datetime import datetime
 from decimal import Decimal
 from functools import wraps
-from urllib2 import urlopen, HTTPError
+from urllib2 import urlopen, HTTPError, Request
 from wsgiref.handlers import format_date_time
 
 import overpy
@@ -65,9 +66,10 @@ cache = Cache(app, config={
 
 
 class Overpass(overpy.Overpass):
-    def __init__(self, url=None, cache=None):
+    def __init__(self, url=None, cache=None, jwt=None):
         super(Overpass, self).__init__(url=url)
         self.cache = cache
+        self.jwt = jwt
 
     def parse_json(self, data, encoding="utf-8"):
         """
@@ -96,8 +98,19 @@ class Overpass(overpy.Overpass):
         return overpy.Result.from_json(data, api=self)
 
     def __request(self, query):
+
+        if self.url.startswith('https'):
+            gcontext = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
+        else:
+            gcontext = None
+
+        if self.jwt:
+            request = Request(self.url, headers={"Authorization": self.jwt})
+        else:
+            request = self.url
+
         try:
-            f = urlopen(self.url, query)
+            f = urlopen(request, query, context=gcontext)
         except HTTPError as e:
             f = e
 
@@ -156,7 +169,10 @@ class Overpass(overpy.Overpass):
 
         if cache:
             opt_query = ';'.join([st.strip('\n').strip(' ') for st in query.split(';')])
-            response = cache_it_json(cache=self.cache)(self.__request)(opt_query)
+            try:
+                response = cache_it_json(cache=self.cache)(self.__request)(opt_query)
+            except Exception as e:
+                raise ValueError(e.message)
         else:
             response = self.__request(query)
 
@@ -174,7 +190,7 @@ cache_q = SimpleCache(hashkeys=True, host=CACHE_REDIS_HOST, port=CACHE_REDIS_POR
                       db=CACHE_REDIS_DB + 2, namespace='q', limit=1000000, expire=MAX_AGE)
 
 api = Overpass(url=os.environ.get('OVERPASS_API_URL', 'http://127.0.0.1:5000/api/interpreter'),
-               cache=cache_q)
+               cache=cache_q, jwt=os.environ.get('JWT_TOKEN', None))
 
 
 def make_cache_key(*args, **kwargs):
@@ -766,10 +782,10 @@ def query_sub_areas(id, admin_level):
     def next_admin_level():
         if admin_level <= 2:
             return sub_admin_level < 4
-        elif admin_level <= 8:
-            return sub_admin_level - admin_level < 3
+        elif admin_level < 8:
+            return sub_admin_level - admin_level <= 3
         elif sub_admin_level < 11:
-            return sub_admin_level - admin_level < 2
+            return sub_admin_level - admin_level <= 2
 
         return False
 
