@@ -972,7 +972,7 @@ def get_geo_elements():
             area = match_area_id(area)
 
         area_geoms = g_area_geom(area) if area else None
-        mp = get_area_multipolygon(area)
+        # mp = get_area_multipolygon(area)
         # print mp.area
     else:
         try:
@@ -995,17 +995,6 @@ def get_geo_elements():
             geo_filter = 'poly:"{}"'.format(' '.join(lat_lng_points))
             center_tuple = list(Polygon(points).representative_point().coords)[0]
             center = LatLon(*reversed(center_tuple))
-
-        area_dict = g_area(area)
-        # elms.append({'id': 'area/{}'.format(area), 'type': area_dict['type']})
-        if area_dict['contains']:
-            elms = [{'id': 'area/{}'.format(x), 'type': g_area(x)['type']} for x in area_dict['contains']]
-            # sub_mp_list = [get_area_multipolygon(sub_area) for sub_area in area_dict['contains']]
-            # sub_mp = MultiPolygon()
-            # for smp in sub_mp_list:
-            #     sub_mp = sub_mp.union(smp)
-            # if mp.difference(sub_mp).area < mp.area * 0.1:
-            #     elms.extend([{'id': 'area/{}'.format(x), 'type': g_area(x)['type']} for x in area_dict['contains']])
     else:
         radius = int(request.args.get('radius', 200))
         center = LatLon(lat, lng)
