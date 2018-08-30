@@ -668,7 +668,8 @@ def get_way_attrs(id, tags, buffer):
             way['areas'] = map(lambda aid: 'area/{}'.format(aid),
                                g_coord_area(way['center']['lat'], way['center']['lon']))
 
-    del way['nd']
+    if 'nd' in way:
+        del way['nd']
     return way
 
 
