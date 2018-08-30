@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# coding=utf-8
 """
 #-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=#
   Ontology Engineering Group
@@ -22,11 +23,14 @@
 
 import multiprocessing
 import os
+from threading import Thread
 
 import gunicorn.app.base
+from concurrent.futures import ThreadPoolExecutor, wait
 from gunicorn.six import iteritems
 
-from geo_pass.api import app
+from geo_pass import debug, info
+from geo_pass.api import app, api, g_area, g_area_geom, get_way_attrs
 
 __author__ = 'Fernando Serena'
 
@@ -35,6 +39,9 @@ API_PORT = int(os.environ.get('API_PORT', 5006))
 
 def number_of_workers():
     return (multiprocessing.cpu_count() * 2) + 1
+
+
+pool = ThreadPoolExecutor(max_workers=number_of_workers())
 
 
 class StandaloneApplication(gunicorn.app.base.BaseApplication):
@@ -56,7 +63,101 @@ class StandaloneApplication(gunicorn.app.base.BaseApplication):
         return self.application
 
 
+def chunks(l, n):
+    """Yield successive n-sized chunks from l."""
+    for i in xrange(0, len(l), n):
+        yield l[i:i + n]
+
+
+def load_buildings(r, ctx):
+    area_geoms = g_area_geom(str(r['id'])) if r['id'] else None
+    if area_geoms:
+        for points in area_geoms:
+            lat_lng_points = ['{} {}'.format(p[1], p[0]) for p in points]
+            geo_filter = 'poly:"{}"'.format(' '.join(lat_lng_points))
+
+            count_query_str = """            
+                                        way[building]["building"!~"no"]({});                            
+                                        out count;
+                                    """.format(geo_filter)
+            count_res = api.query(count_query_str, maxsize=134217728, expire=86400)
+            if count_res['total'] > 10000:
+                return
+
+            info('Loading {} buildings from '.format(count_res['total']) + r['tag']['name'] + '...')
+            query_str = """            
+                            way[building]["building"!~"no"]({});                            
+                            out tags;
+                        """.format(geo_filter)
+            results = api.query(query_str, maxsize=134217728, expire=86400)
+            for b in results.ways:
+                get_way_attrs(str(b.id), None, None)
+                ctx['buildings_loaded'] += 1
+                info('Loaded building ' + str(r['id']) + ' ({}/{}) - {:.2f}%'.format(ctx['buildings_loaded'],
+                                                                                     ctx['total_buildings'],
+                                                                                     ctx['buildings_loaded'] * 100 /
+                                                                                     ctx['total_buildings']))
+
+
+def crawl_areas():
+    res = api.query(u"""
+                        /*blah*/
+                        area[boundary=administrative][type][admin_level][name];
+                        out count;
+                    """, expire=86400)
+    total_areas = float(res['areas'])
+    res = api.query(u"""            
+                            way[building]["building"!~"no"];                            
+                            out count;
+                        """, expire=86400)
+    total_buildings = float(res['ways'])
+
+    ctx = {
+        'total_areas': total_areas,
+        'total_buildings': total_buildings,
+        'areas_loaded': 0,
+        'buildings_loaded': 0
+
+    }
+
+    debug('Total areas: ' + str(total_areas))
+    debug('Total buildings: ' + str(total_buildings))
+    for admin_level in range(2, 11):
+        try:
+            res = api.query(u"""
+                                area[boundary=administrative][type][admin_level={}][name];
+                                out;
+                            """.format(admin_level))
+
+            for chunk in chunks(list(res.areas), 4):
+                futures = []
+                for area in chunk:
+                    if admin_level == 2 and area.tags['name'] != u'España':
+                        continue
+
+                    ctx['areas_loaded'] += 1
+                    info(u'Loading area: [{}:{}] {} - ({}/{}) - {:.2f}%'.format(area.id, admin_level,
+                                                                             area.tags['name'],
+                                                                             ctx['areas_loaded'],
+                                                                             total_areas,
+                                                                             ctx['areas_loaded'] * 100 / total_areas))
+                    future = pool.submit(g_area, str(area.id))
+                    futures.append(future)
+                wait(futures)
+                results = [future.result() for future in futures]
+                for r in results:
+                    if not r.get('contains'):
+                        pool.submit(load_buildings, r, ctx)
+        except Exception as e:
+            debug(e.message)
+
+
 if __name__ == '__main__':
+
+    crawl_th = Thread(target=crawl_areas)
+    crawl_th.daemon = True
+    crawl_th.start()
+
     try:
         options = {
             'bind': '%s:%s' % ('0.0.0.0', str(API_PORT)),
@@ -70,4 +171,4 @@ if __name__ == '__main__':
         }
         StandaloneApplication(options).run()
     except (KeyboardInterrupt, SystemExit, SystemError):
-        pass
+        pool.shutdown(wait=False)

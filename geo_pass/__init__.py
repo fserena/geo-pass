@@ -18,12 +18,24 @@
   limitations under the License.
 #-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=#
 """
+import logging
 import os
 
-import sys
 import requests
 
 __author__ = 'Fernando Serena'
+
+log_level = int(os.environ.get('LOG_LEVEL', logging.INFO))
+
+log = logging.getLogger('geopass')
+log.setLevel(log_level)
+for h in log.handlers:
+    log.removeHandler(h)
+ch = logging.StreamHandler()
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+ch.setLevel(log_level)
+ch.setFormatter(formatter)
+log.addHandler(ch)
 
 google_api_key = os.environ.get('GOOGLE_API_KEY', None)
 
@@ -50,3 +62,24 @@ def streetview(lat, lng):
 
     if response.status_code == 200:
         return response.content
+
+
+def debug(msg):
+    try:
+        log.debug(msg)
+    except Exception:
+        pass
+
+
+def info(msg):
+    try:
+        log.info(msg)
+    except Exception:
+        pass
+
+
+def error(msg):
+    try:
+        log.error(msg)
+    except Exception:
+        pass

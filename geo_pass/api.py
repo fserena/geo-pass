@@ -44,7 +44,7 @@ from shapely.geometry import Point, Polygon, LineString, MultiPoint, MultiPolygo
 from shapely.ops import nearest_points
 from shapely.wkt import dumps
 
-from geo_pass import geocoding
+from geo_pass import geocoding, debug, info, error
 from geo_pass.poly import ways2poly
 
 __author__ = 'Fernando Serena'
@@ -84,7 +84,12 @@ class Overpass(overpy.Overpass):
         """
 
         try:
-            members = data.get('elements', [{}])[0].get('members', [])
+            elements = data.get('elements', [{}])[0]
+            if elements.get('type', '') == 'count':
+                return {k: int(v) for k, v in elements['tags'].iteritems()}
+            else:
+                members = elements.get('members', [])
+
         except IndexError:
             members = None
         if members:
@@ -98,6 +103,8 @@ class Overpass(overpy.Overpass):
         return overpy.Result.from_json(data, api=self)
 
     def __request(self, query):
+
+        debug("querying:" + query)
 
         if self.url.startswith('https'):
             gcontext = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
@@ -160,17 +167,16 @@ class Overpass(overpy.Overpass):
 
         raise exception.OverpassUnknownHTTPStatusCode(f.code)
 
-    def query(self, query, cache=True, maxsize=536870912):
+    def query(self, query, cache=True, expire=MAX_AGE, maxsize=536870912):
         if not isinstance(query, bytes):
             query = query.encode("utf-8")
 
-        # print "querying:", query
         query = "[maxsize:{}][out:json];\n".format(maxsize) + query
 
         if cache:
             opt_query = ';'.join([st.strip('\n').strip(' ') for st in query.split(';')])
             try:
-                response = cache_it_json(cache=self.cache)(self.__request)(opt_query)
+                response = cache_it_json(cache=self.cache, expire=expire)(self.__request)(opt_query)
             except Exception as e:
                 raise ValueError(e.message)
         else:
@@ -242,6 +248,7 @@ def is_building(way):
 
 @cache_it_json(cache=cache_proc)
 def query_way_buildings(id):
+    debug('Way buildings of ' + str(id))
     query = """
      way({});
     way(around:20)[building]["building"!~"no"];        
@@ -254,6 +261,7 @@ def query_way_buildings(id):
 
 @cache_it_json(cache=cache_proc)
 def query_way_elms(id):
+    debug('Way elements of ' + str(id))
     query = """
     way({});
     (
@@ -267,6 +275,8 @@ def query_way_elms(id):
 
 @cache_it_json(cache=cache_proc)
 def query_building_ways(id):
+    debug('Building ways of ' + str(id))
+
     def filter_way(w):
         buildings = query_way_buildings(w.id)
         return any([b for b in buildings if b['id'] == int(id)])
@@ -287,6 +297,7 @@ def query_building_ways(id):
 
 @cache_it_json(cache=cache_proc)
 def query_building_elms(way):
+    debug('Building elements of ' + str(way['id']))
     result = api.query("""way({}); out geom; >; out body;""".format(way['id']))
 
     points = [(float(result.get_node(n).lon), float(result.get_node(n).lat)) for n in way['nd']]
@@ -315,6 +326,7 @@ def query_building_elms(way):
 
 @cache_it_json(cache=cache_proc)
 def query_surrounding_buildings(id):
+    debug('Surrounding buildings of ' + str(id))
     result = api.query("""
         way({});
         out center;
@@ -329,6 +341,7 @@ def query_surrounding_buildings(id):
 
 @cache_it_json(cache=cache_proc)
 def query_intersect_ways(id):
+    debug('Intersecting ways of ' + str(id))
     result = api.query("""
     way({});
     >;
@@ -449,6 +462,7 @@ def g_coord_area(lat, lon):
 
 @cache_it_json(cache=cache_proc)
 def g_way_geom(id):
+    debug('Geometry of ' + str(id))
     geom = api.query("""
                 way({});
                 (._; >;);
@@ -473,6 +487,8 @@ def relation_multipolygon(rels):
 
 @cache_it_json(cache=cache_proc)
 def g_area_geom(id):
+    debug('Area geometry of ' + str(id))
+
     def transform_tag_value(k, v):
         if k == 'admin_level':
             return int(v)
@@ -588,32 +604,7 @@ def filter_building(way, b, polygons):
     return filtered
 
 
-@app.route('/way/<id>')
-@cache.cached(timeout=MAX_AGE, key_prefix=make_cache_key)
-def get_way(id):
-    lat = request.args.get('lat')
-    lng = request.args.get('lng')
-    area = request.args.get('area')
-    tags = request.args.get('tags')
-    tags = tags is not None
-    buffer = None
-
-    if area:
-        try:
-            int(area)
-        except ValueError:
-            area = match_area_id(area)
-
-        buffer = get_area_multipolygon(area)
-    elif any([lat, lng]):
-        lat = float(lat)
-        lng = float(lng)
-        radius = float(request.args.get('radius', 100))
-        poi = LatLon(lat, lng)
-        r_p = poi.offset(90, radius / 1000.0)
-        buffer = Point(lng, lat).buffer(abs((float(r_p.lon) - float(poi.lon))), resolution=5, mitre_limit=1.0)
-        buffer = shapely.affinity.scale(buffer, 1.0, 0.75)
-
+def get_way_attrs(id, tags, buffer):
     way = g_way(id)
     if is_road(way):
         way['type'] = 'way'
@@ -678,6 +669,36 @@ def get_way(id):
                                g_coord_area(way['center']['lat'], way['center']['lon']))
 
     del way['nd']
+    return way
+
+
+@app.route('/way/<id>')
+@cache.cached(timeout=MAX_AGE, key_prefix=make_cache_key)
+def get_way(id):
+    lat = request.args.get('lat')
+    lng = request.args.get('lng')
+    area = request.args.get('area')
+    tags = request.args.get('tags')
+    tags = tags is not None
+    buffer = None
+
+    if area:
+        try:
+            int(area)
+        except ValueError:
+            area = match_area_id(area)
+
+        buffer = get_area_multipolygon(area)
+    elif any([lat, lng]):
+        lat = float(lat)
+        lng = float(lng)
+        radius = float(request.args.get('radius', 100))
+        poi = LatLon(lat, lng)
+        r_p = poi.offset(90, radius / 1000.0)
+        buffer = Point(lng, lat).buffer(abs((float(r_p.lon) - float(poi.lon))), resolution=5, mitre_limit=1.0)
+        buffer = shapely.affinity.scale(buffer, 1.0, 0.75)
+
+    way = get_way_attrs(id, tags, buffer)
     response = jsonify(way)
     response.headers['Cache-Control'] = 'max-age={}'.format(MAX_AGE)
     response.headers['Last-Modified'] = format_date_time(time.mktime(datetime.now().timetuple()))
@@ -707,6 +728,7 @@ def _process_rel_member(m):
 @app.route('/node/<id>')
 @cache.cached(timeout=MAX_AGE, key_prefix=make_tags_cache_key)
 def get_node(id):
+    debug('Getting node ' + str(id))
     node = g_node(id)
     tags = request.args.get('tags')
     tags = tags is not None
@@ -778,6 +800,12 @@ def search_sub_admin_areas(sub_admin_level, geoms):
 
 
 @cache_it_json(cache=cache_proc)
+def area_sfc(id):
+    sub_area_multipoly = get_area_multipolygon(id)
+    return sub_area_multipoly.area
+
+
+@cache_it_json(cache=cache_proc)
 def query_sub_areas(id, admin_level):
     def next_admin_level():
         if admin_level <= 2:
@@ -798,8 +826,9 @@ def query_sub_areas(id, admin_level):
         simpl_geoms = geoms.simplify(area_factor)
         sub_admins_ids = set()
         sub_admin_level = admin_level
+        geoms_area = geoms.area
 
-        while next_admin_level() and (diff_geoms.area > geoms.area * 0.1 or not contained_areas):
+        while next_admin_level() and (diff_geoms.area > geoms_area * 0.1 or not contained_areas):
             bounds = diff_geoms.bounds
 
             if len(bounds) != 4:
@@ -821,27 +850,31 @@ def query_sub_areas(id, admin_level):
                     sub_area_ids.add(sub_rel_area.id)
 
             sub_area_ids = filter(lambda a: a not in contained_areas, sub_area_ids)
+            simpl_geoms_area = simpl_geoms.area
             for sub_area_id in sub_area_ids:
                 sub_area_multipoly = get_area_multipolygon(sub_area_id)
-                sub_area_factor = simplify_factor(sub_area_multipoly, max=0.1)
+                sub_area = area_sfc(sub_area_id)
                 try:
-                    intersection = sub_area_multipoly.simplify(sub_area_factor).intersection(simpl_geoms)
-                    if isinstance(intersection, Polygon) or isinstance(intersection, MultiPolygon):
-                        if intersection.area >= sub_area_multipoly.area * 0.1:
-                            contained_areas.add(sub_area_id)
-                            try:
-                                diff_geoms = diff_geoms.difference(sub_area_multipoly)
-                            except Exception:
-                                for sub_area_poly in sub_area_multipoly:
-                                    try:
-                                        diff_geoms = diff_geoms.difference(sub_area_poly)
-                                    except Exception as e:
-                                        print e.message
+                    diff = simpl_geoms.difference(sub_area_multipoly.convex_hull)
+                    area_reduction = simpl_geoms_area - diff.area
                 except TopologicalError:
-                    pass
+                    try:
+                        diff = geoms.difference(sub_area_multipoly)
+                        area_reduction = geoms_area - diff.area
+                    except TopologicalError as e:
+                        error(e.message)
 
-    if len(contained_areas) >= 2:
-        pass
+                if isinstance(diff, Polygon) or isinstance(diff, MultiPolygon):
+                    if area_reduction / sub_area > 0.9:
+                        contained_areas.add(sub_area_id)
+                        try:
+                            diff_geoms = diff_geoms.difference(sub_area_multipoly)
+                        except Exception:
+                            for sub_area_poly in sub_area_multipoly:
+                                try:
+                                    diff_geoms = diff_geoms.difference(sub_area_poly)
+                                except Exception as e:
+                                    pass
 
     return list(contained_areas)
 
@@ -864,6 +897,7 @@ def g_area(id):
     if spec_type:
         type = ':'.join([type, spec_type])
 
+    debug('Sub areas of ' + area.tags['name'])
     contained_areas = query_sub_areas(id, admin_level)
 
     return {'type': type,
@@ -972,8 +1006,6 @@ def get_geo_elements():
             area = match_area_id(area)
 
         area_geoms = g_area_geom(area) if area else None
-        # mp = get_area_multipolygon(area)
-        # print mp.area
     else:
         try:
             location = request.args.get('location')
@@ -1000,90 +1032,89 @@ def get_geo_elements():
         center = LatLon(lat, lng)
         geo_filter = 'around:{},{},{}'.format(radius, lat, lng)
 
-    if not elms:
-        if elm_filters:
-            way_query_union = []
-            node_query_union = []
-            if 'building' in elm_filters:
-                way_query_union.append('way.wa[building]["building"!~"no"]')
-            if 'way' in elm_filters:
-                way_query_union.append('way.wa[highway]')
-                way_query_union.append('way.wa[footway]')
-            if 'shop' in elm_filters:
-                node_query_union.append('node.na[shop]')
-            if 'amenity' in elm_filters:
-                node_query_union.append('node.na[amenity]')
-            if 'highway' in elm_filters:
-                node_query_union.append('node.na[highway]')
-            if 'tourism' in elm_filters:
-                node_query_union.append('node.na[tourism]')
+    if elm_filters:
+        way_query_union = []
+        node_query_union = []
+        if 'building' in elm_filters:
+            way_query_union.append('way.wa[building]["building"!~"no"]')
+        if 'way' in elm_filters:
+            way_query_union.append('way.wa[highway]')
+            way_query_union.append('way.wa[footway]')
+        if 'shop' in elm_filters:
+            node_query_union.append('node.na[shop]')
+        if 'amenity' in elm_filters:
+            node_query_union.append('node.na[amenity]')
+        if 'highway' in elm_filters:
+            node_query_union.append('node.na[highway]')
+        if 'tourism' in elm_filters:
+            node_query_union.append('node.na[tourism]')
 
-            query_str = ''
-            if way_query_union:
-                query_str += 'way({}) -> .wa;\n(\n'.format(geo_filter)
-                query_str += ';\n'.join(way_query_union)
-                query_str += '\n);\nout tags;'
+        query_str = ''
+        if way_query_union:
+            query_str += 'way({}) -> .wa;\n(\n'.format(geo_filter)
+            query_str += ';\n'.join(way_query_union)
+            query_str += '\n);\nout tags;'
 
-            if node_query_union:
-                query_str += 'node({}) -> .na;\n(\n'.format(geo_filter)
-                query_str += ';\n'.join(node_query_union)
-                query_str += '\n);\nout tags;'
-        else:
-            query_str = """            
-                    way[building]["building"!~"no"]({});                            
-                    out tags;
-                    """.format(geo_filter)
+        if node_query_union:
+            query_str += 'node({}) -> .na;\n(\n'.format(geo_filter)
+            query_str += ';\n'.join(node_query_union)
+            query_str += '\n);\nout tags;'
+    else:
+        query_str = """            
+                way[building]["building"!~"no"]({});                            
+                out tags;
+                """.format(geo_filter)
 
-        osm_result = api.query(query_str, maxsize=134217728)
+    osm_result = api.query(query_str, maxsize=134217728, expire=864000)
 
-        for i, node in enumerate(osm_result.nodes):
-            elm = {'id': 'node/{}'.format(node.id)}  # node_distance(node, poi)}
-            key = _elm_key({'tags': node.tags}, MATCH_TAGS)
-            if key is None:
-                key = 'node'
-            if 'name' in node.tags:
-                elm['name'] = node.tags['name']
-            elm['type'] = 'node:' + key
-            elms.append(elm)
+    for i, node in enumerate(osm_result.nodes):
+        elm = {'id': 'node/{}'.format(node.id)}  # node_distance(node, poi)}
+        key = _elm_key({'tags': node.tags}, MATCH_TAGS)
+        if key is None:
+            key = 'node'
+        if 'name' in node.tags:
+            elm['name'] = node.tags['name']
+        elm['type'] = 'node:' + key
+        elms.append(elm)
 
-            if limit and i == limit - 1:
-                break
+        if limit and i == limit - 1:
+            break
 
-        for i, way in enumerate(osm_result.ways):
-            elm = {'id': 'way/{}'.format(way.id)}  # way_distance(osm_result, way, poi)}
-            key = _elm_key({'tags': way.tags}, MATCH_TAGS)
-            if key is None:
-                key = 'way'
-            if 'name' in way.tags:
-                elm['name'] = way.tags['name']
-            elm['type'] = 'way:' + key
-            elms.append(elm)
+    for i, way in enumerate(osm_result.ways):
+        elm = {'id': 'way/{}'.format(way.id)}  # way_distance(osm_result, way, poi)}
+        key = _elm_key({'tags': way.tags}, MATCH_TAGS)
+        if key is None:
+            key = 'way'
+        if 'name' in way.tags:
+            elm['name'] = way.tags['name']
+        elm['type'] = 'way:' + key
+        elms.append(elm)
 
-            if limit and i == limit - 1:
-                break
+        if limit and i == limit - 1:
+            break
 
-        restrict = request.args.get('restrict', None)
-        restrict = restrict is not None
+    restrict = request.args.get('restrict', None)
+    restrict = restrict is not None
 
-        osm_result = api.query("""
-              is_in({},{}) -> .a;
-              area.a[admin_level];
-              out;""".format(lat, lng))
-        for res_area in osm_result.areas:
-            if area and restrict and int(res_area.id) != int(area):
-                continue
+    osm_result = api.query("""
+          is_in({},{}) -> .a;
+          area.a[admin_level];
+          out;""".format(lat, lng))
+    for res_area in osm_result.areas:
+        if area and restrict and int(res_area.id) != int(area):
+            continue
 
-            a = 'area/{}'.format(res_area.id)
-            admin_level = int(res_area.tags['admin_level'])
-            type = 'area'
-            if admin_level == 4:
-                type += ':province'
-            elif admin_level == 8:
-                type += ':municipality'
-            elif admin_level == 2:
-                type += ':country'
-            elm = {'id': a, 'type': type}
-            elms.append(elm)
+        a = 'area/{}'.format(res_area.id)
+        admin_level = int(res_area.tags['admin_level'])
+        type = 'area'
+        if admin_level == 4:
+            type += ':province'
+        elif admin_level == 8:
+            type += ':municipality'
+        elif admin_level == 2:
+            type += ':country'
+        elm = {'id': a, 'type': type}
+        elms.append(elm)
 
     result = {
         'center': {
