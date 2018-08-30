@@ -93,7 +93,7 @@ def load_buildings(r, ctx):
             for b in results.ways:
                 get_way_attrs(str(b.id), None, None)
                 ctx['buildings_loaded'] += 1
-                info('Loaded building ' + str(r['id']) + ' ({}/{}) - {:.2f}%'.format(ctx['buildings_loaded'],
+                info('Loaded building ' + str(b.id) + ' ({}/{}) - {:.2f}%'.format(ctx['buildings_loaded'],
                                                                                      ctx['total_buildings'],
                                                                                      ctx['buildings_loaded'] * 100 /
                                                                                      ctx['total_buildings']))
