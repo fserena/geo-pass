@@ -132,9 +132,6 @@ def crawl_areas():
             for chunk in chunks(list(res.areas), 4):
                 futures = []
                 for area in chunk:
-                    if admin_level == 2 and area.tags['name'] != u'España':
-                        continue
-
                     ctx['areas_loaded'] += 1
                     info(u'Loading area: [{}:{}] {} - ({}/{}) - {:.2f}%'.format(area.id, admin_level,
                                                                              area.tags['name'],
@@ -156,7 +153,7 @@ if __name__ == '__main__':
 
     crawl_th = Thread(target=crawl_areas)
     crawl_th.daemon = True
-    crawl_th.start()
+    # crawl_th.start()
 
     try:
         options = {
