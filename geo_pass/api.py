@@ -44,7 +44,7 @@ from shapely.geometry import Point, Polygon, LineString, MultiPoint, MultiPolygo
 from shapely.ops import nearest_points
 from shapely.wkt import dumps
 
-from geo_pass import geocoding, debug, info, error
+from geo_pass import geocoding, debug, info, error, ZSimpleCache
 from geo_pass.poly import ways2poly
 
 __author__ = 'Fernando Serena'
@@ -192,7 +192,7 @@ class Overpass(overpy.Overpass):
 cache_proc = SimpleCache(hashkeys=True, host=CACHE_REDIS_HOST, port=CACHE_REDIS_PORT,
                          db=CACHE_REDIS_DB + 1, namespace='pr', limit=10000000, expire=MAX_AGE)
 
-cache_q = SimpleCache(hashkeys=True, host=CACHE_REDIS_HOST, port=CACHE_REDIS_PORT,
+cache_q = ZSimpleCache(hashkeys=True, host=CACHE_REDIS_HOST, port=CACHE_REDIS_PORT,
                       db=CACHE_REDIS_DB + 2, namespace='q', limit=100000, expire=MAX_AGE)
 
 api = Overpass(url=os.environ.get('OVERPASS_API_URL', 'http://127.0.0.1:5000/api/interpreter'),

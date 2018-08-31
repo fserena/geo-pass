@@ -20,8 +20,10 @@
 """
 import logging
 import os
+import zlib
 
 import requests
+from redis_cache import SimpleCache, to_unicode, json
 
 __author__ = 'Fernando Serena'
 
@@ -83,3 +85,64 @@ def error(msg):
         log.error(msg)
     except Exception:
         pass
+
+
+class ZSimpleCache(SimpleCache):
+    def make_key(self, key):
+        return "C-{0}:{1}".format(self.prefix, key)
+
+    def get_set_name(self):
+        return "C-{0}-keys".format(self.prefix)
+
+    def store_json(self, key, value, expire=None):
+        if 'osm3s' in value:
+            del value['osm3s']
+            del value['version']
+            del value['generator']
+        ss = json.dumps(value)
+        value = zlib.compress(ss)
+        self.store(key, value, expire)
+
+    def get_json(self, key):
+        return json.loads(zlib.decompress(self.get(key)))
+
+    def mget_json(self, keys):
+        """
+        Method returns a dict of key/values for found keys with each value
+        parsed from JSON format.
+        :param keys: array of keys to look up in Redis
+        :return: dict of found key/values with values parsed from JSON format
+        """
+        d = self.mget(keys)
+        if d:
+            for key in d.keys():
+                d[key] = json.loads(zlib.decompress(d[key])) if d[key] else None
+            return d
+
+    def store(self, key, value, expire=None):
+        """
+        Method stores a value after checking for space constraints and
+        freeing up space if required.
+        :param key: key by which to reference datum being stored in Redis
+        :param value: actual value being stored under this key
+        :param expire: time-to-live (ttl) for this datum
+        """
+        key = to_unicode(key)
+        # value = to_unicode(value)
+        set_name = self.get_set_name()
+
+        while self.connection.scard(set_name) >= self.limit:
+            del_key = self.connection.spop(set_name)
+            self.connection.delete(self.make_key(del_key))
+
+        pipe = self.connection.pipeline()
+        if expire is None:
+            expire = self.expire
+
+        if isinstance(expire, int) and expire <= 0:
+            pipe.set(self.make_key(key), value)
+        else:
+            pipe.setex(self.make_key(key), expire, value)
+
+        pipe.sadd(set_name, key)
+        pipe.execute()
