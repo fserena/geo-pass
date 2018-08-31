@@ -190,10 +190,10 @@ class Overpass(overpy.Overpass):
 
 
 cache_proc = SimpleCache(hashkeys=True, host=CACHE_REDIS_HOST, port=CACHE_REDIS_PORT,
-                         db=CACHE_REDIS_DB + 1, namespace='pr', limit=1000000, expire=MAX_AGE)
+                         db=CACHE_REDIS_DB + 1, namespace='pr', limit=10000000, expire=MAX_AGE)
 
 cache_q = SimpleCache(hashkeys=True, host=CACHE_REDIS_HOST, port=CACHE_REDIS_PORT,
-                      db=CACHE_REDIS_DB + 2, namespace='q', limit=1000000, expire=MAX_AGE)
+                      db=CACHE_REDIS_DB + 2, namespace='q', limit=100000, expire=MAX_AGE)
 
 api = Overpass(url=os.environ.get('OVERPASS_API_URL', 'http://127.0.0.1:5000/api/interpreter'),
                cache=cache_q, jwt=os.environ.get('JWT_TOKEN', None))

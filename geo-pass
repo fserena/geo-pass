@@ -91,7 +91,7 @@ def load_buildings(r, ctx):
                         """.format(geo_filter)
             results = api.query(query_str, maxsize=134217728, expire=86400)
             for b in results.ways:
-                get_way_attrs(str(b.id), None, None)
+                get_way_attrs(str(b.id), True, None)
                 ctx['buildings_loaded'] += 1
                 info('Loaded building ' + str(b.id) + ' ({}/{}) - {:.2f}%'.format(ctx['buildings_loaded'],
                                                                                      ctx['total_buildings'],
@@ -122,7 +122,7 @@ def crawl_areas():
 
     debug('Total areas: ' + str(total_areas))
     debug('Total buildings: ' + str(total_buildings))
-    for admin_level in range(2, 11):
+    for admin_level in reversed(range(2, 11)):
         try:
             res = api.query(u"""
                                 area[boundary=administrative][type][admin_level={}][name];
