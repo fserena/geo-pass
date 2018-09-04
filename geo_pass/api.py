@@ -950,6 +950,7 @@ def _elm_key(elm, match=set()):
     key = None
     tags = elm.get('tags', elm.get('tag'))
     matching_tags = list(set(match).intersection(set(tags.keys())))
+    matching_tags = sorted(matching_tags, key=lambda x: x == 'building')
     try:
         tag = matching_tags.pop()
         key = '{}:{}'.format(tag, tags[tag])
