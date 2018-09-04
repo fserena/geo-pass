@@ -1084,9 +1084,12 @@ def get_geo_elements():
     geo_filters = []
 
     if area:
-        area_geoms = get_free_area(area)
-        # if not area_geoms:
+        free_area = get_free_area(area)
         if 'area' in elm_filters:
+            area_mp = get_area_multipolygon(area)
+            center_tuple = list(area_mp.representative_point().coords)[0]
+            center = LatLon(*reversed(center_tuple))
+
             area_dict = g_area(str(area))
             admin_level = int(area_dict['tag']['admin_level'])
             if restrict:
@@ -1096,16 +1099,14 @@ def get_geo_elements():
                 elms = [{'type': area_type(sa['tag']['admin_level']), 'id': 'area/{}'.format(sa['id'])} for sa in
                         subareas]
 
-        for points in area_geoms:
-            lat, lng = points[0][1], points[0][0]
+        for points in free_area:
+            # lat, lng = points[0][1], points[0][0]
             lat_lng_points = ['{} {}'.format(p[1], p[0]) for p in points]
             geo_filter = 'poly:"{}"'.format(' '.join(lat_lng_points))
-            # center_tuple = list(Polygon(points).representative_point().coords)[0]
-            # center = LatLon(*reversed(center_tuple))
             geo_filters.append(geo_filter)
     else:
         radius = int(request.args.get('radius', 200))
-        # center = LatLon(lat, lng)
+        center = LatLon(lat, lng)
         geo_filter = 'around:{},{},{}'.format(radius, lat, lng)
         geo_filters.append(geo_filter)
 
@@ -1177,7 +1178,7 @@ def get_geo_elements():
         osm_result = api.query("""
               is_in({},{}) -> .a;
               area.a[admin_level];
-              out;""".format(lat, lng))
+              out;""".format(center.lat, center.lon))
 
         max_admin_level = 0
         areas_found = []
@@ -1194,8 +1195,6 @@ def get_geo_elements():
             elm = {'id': 'area/{}'.format(d['id']), 'type': area_type(d['l'])}
             if elm not in elms:
                 elms.append(elm)
-
-    center = LatLon(lat, lng)
 
     result = {
         'center': {
