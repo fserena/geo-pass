@@ -1084,12 +1084,12 @@ def get_geo_elements():
     geo_filters = []
 
     if area:
+        area_mp = get_area_multipolygon(area)
+        center_tuple = list(area_mp.representative_point().coords)[0]
+        center = LatLon(*reversed(center_tuple))
+
         free_area = get_free_area(area)
         if 'area' in elm_filters:
-            area_mp = get_area_multipolygon(area)
-            center_tuple = list(area_mp.representative_point().coords)[0]
-            center = LatLon(*reversed(center_tuple))
-
             area_dict = g_area(str(area))
             admin_level = int(area_dict['tag']['admin_level'])
             if restrict:
